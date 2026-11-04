@@ -349,29 +349,58 @@ func trimRight(s string) string {
 
 // --- shapes -------------------------------------------------------------
 
-// pathBuilder collects polygons in points and fills them at the renderer's scale.
+// pathBuilder collects polygons in points and fills them at the renderer's
+// scale. The rasterizer covers only the polygons' bounding box: one the size
+// of the whole image made every 12pt checkbox cost a full-image pass.
 type pathBuilder struct {
-	r   *renderer
-	ras *vector.Rasterizer
-	img *image.RGBA
+	r     *renderer
+	img   *image.RGBA
+	polys [][][2]float32 // in device pixels
 }
 
 func (r *renderer) path(img *image.RGBA) *pathBuilder {
-	b := img.Bounds()
-	return &pathBuilder{r: r, img: img, ras: vector.NewRasterizer(b.Dx(), b.Dy())}
+	return &pathBuilder{r: r, img: img}
 }
 
 func (p *pathBuilder) poly(pts [][2]float64) {
-	s := float32(p.r.scale)
-	p.ras.MoveTo(float32(pts[0][0])*s, float32(pts[0][1])*s)
-	for _, pt := range pts[1:] {
-		p.ras.LineTo(float32(pt[0])*s, float32(pt[1])*s)
+	s := p.r.scale
+	px := make([][2]float32, len(pts))
+	for i, pt := range pts {
+		px[i] = [2]float32{float32(pt[0] * s), float32(pt[1] * s)}
 	}
-	p.ras.ClosePath()
+	p.polys = append(p.polys, px)
 }
 
 func (p *pathBuilder) fill(col color.RGBA) {
-	p.ras.Draw(p.img, p.img.Bounds(), image.NewUniform(col), image.Point{})
+	if len(p.polys) == 0 {
+		return
+	}
+	minX, minY := float32(math.Inf(1)), float32(math.Inf(1))
+	maxX, maxY := float32(math.Inf(-1)), float32(math.Inf(-1))
+	for _, poly := range p.polys {
+		for _, pt := range poly {
+			minX, maxX = min(minX, pt[0]), max(maxX, pt[0])
+			minY, maxY = min(minY, pt[1]), max(maxY, pt[1])
+		}
+	}
+	box := image.Rect(
+		int(math.Floor(float64(minX))), int(math.Floor(float64(minY))),
+		int(math.Ceil(float64(maxX))), int(math.Ceil(float64(maxY))),
+	).Intersect(p.img.Bounds())
+	if box.Empty() {
+		return
+	}
+	// The rasterizer's origin lands on box.Min in the image.
+	ras := vector.NewRasterizer(box.Dx(), box.Dy())
+	ox, oy := float32(box.Min.X), float32(box.Min.Y)
+	for _, poly := range p.polys {
+		ras.MoveTo(poly[0][0]-ox, poly[0][1]-oy)
+		for _, pt := range poly[1:] {
+			ras.LineTo(pt[0]-ox, pt[1]-oy)
+		}
+		ras.ClosePath()
+	}
+	ras.Draw(p.img, box, image.NewUniform(col), image.Point{})
 }
 
 // arc appends points along a clockwise arc (screen coordinates) from a0 to a1 radians.

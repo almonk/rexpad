@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const sample = `# Investigate the crash
@@ -341,5 +342,31 @@ func TestRenderHonorsOffset(t *testing.T) {
 	a, b := r.Render(l, 400, 300, maxOff), r.Render(l, 400, 300, maxOff+500)
 	if string(a.Pix) != string(b.Pix) {
 		t.Error("offset wasn't clamped to the content")
+	}
+}
+
+func TestEaseTowardGlidesThenSettles(t *testing.T) {
+	shown, target := 0.0, 14.0 // one wheel tick, in points
+	first := easeToward(shown, target, animFrame, 2)
+	if first <= 0 || first >= target {
+		t.Fatalf("first frame = %v, want partway to %v", first, target)
+	}
+	elapsed := animFrame
+	for shown = first; shown != target; elapsed += animFrame {
+		next := easeToward(shown, target, animFrame, 2)
+		if next < shown {
+			t.Fatalf("went backwards: %v -> %v", shown, next)
+		}
+		shown = next
+		if elapsed > time.Second {
+			t.Fatal("never settled")
+		}
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Errorf("a single tick took %v to settle", elapsed)
+	}
+	// Scrolling up eases down toward a smaller target too.
+	if got := easeToward(20, 6, animFrame, 2); got >= 20 || got <= 6 {
+		t.Errorf("upward step = %v", got)
 	}
 }

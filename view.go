@@ -300,6 +300,25 @@ func (tc termColors) palette(theme string) palette {
 	return themedPalette(fg, tc.bg, accent)
 }
 
+// Scroll easing: each frame closes the same share of the remaining distance
+// (exponential smoothing). Rapid wheel ticks keep moving the target, so the
+// view keeps gliding instead of stepping; a single tick settles in ~150 ms.
+const (
+	animFrame = 8 * time.Millisecond // ~120 Hz, a crop move costs a few bytes
+	easeTau   = 45 * time.Millisecond
+)
+
+// easeToward moves shown toward target for a frame of length dt, snapping
+// once it's within half a device pixel. Offsets are in points.
+func easeToward(shown, target float64, dt time.Duration, scale float64) float64 {
+	k := 1 - math.Exp(-float64(dt)/float64(easeTau))
+	shown += (target - shown) * k
+	if math.Abs(target-shown)*scale < 0.5 {
+		return target
+	}
+	return shown
+}
+
 // activeID is the first active item's ID, or 0.
 func activeID(l *List) int {
 	for _, g := range l.Groups {
@@ -387,29 +406,52 @@ func runView(name string, opt viewOptions) error {
 		lastSize  winSize
 		imgID     = 1
 		cur       sheet
+		placed    [2]int // the image ID and crop row last placed, to skip repeats
 		list      = &List{}
+		scale     = 1.0
 
 		// Scrolling: the view follows the active item until the user scrolls,
 		// and goes back to following when a different item becomes active.
-		follow     = true
-		manual     float64 // offset in points while not following
-		lastOffset float64
-		maxOffset  float64
-		viewH      float64
-		anchor     int // the active item when the user started scrolling
-		scrolled   bool
+		// target is where the view is heading, in points; shown is where it is.
+		// shown eases toward target, so wheel ticks glide instead of jumping.
+		follow    = true
+		manual    float64 // the target while not following
+		target    float64
+		shown     float64
+		maxOffset float64
+		viewH     float64
+		anchor    int // the active item when the user started scrolling
+		started   bool
+
+		anim     *time.Ticker
+		animC    <-chan time.Time // nil while idle
+		lastStep time.Time
 	)
+	startAnim := func() {
+		if anim == nil {
+			anim = time.NewTicker(animFrame)
+			animC = anim.C
+			lastStep = time.Now().Add(-animFrame) // the first step moves right away
+		}
+	}
+	stopAnim := func() {
+		if anim != nil {
+			anim.Stop()
+			anim, animC = nil, nil
+		}
+	}
+
+	// draw brings the screen up to date. It re-renders the sheet only when
+	// the list, size, or theme changed, or the view left the rendered part;
+	// otherwise it only moves the crop window.
 	draw := func(force bool) {
 		stamp := ""
 		if st, err := os.Stat(path); err == nil {
 			stamp = fmt.Sprint(st.ModTime().UnixNano(), st.Size())
 		}
 		ws := getWinSize(int(out.Fd()))
-		changed := stamp != lastStamp || ws != lastSize
-		if !force && !scrolled && !changed {
-			return
-		}
-		scrolled = false
+		resized := ws != lastSize
+		changed := stamp != lastStamp || resized
 		if stamp != lastStamp {
 			if l, err := loadList(path); err == nil {
 				list = l
@@ -423,16 +465,25 @@ func runView(name string, opt viewOptions) error {
 		// Whole cells only, so the image is exactly the grid it's pinned to.
 		cellW, cellH := ws.xpix/ws.cols, ws.ypix/ws.rows
 		widthPx, viewPx := cellW*ws.cols, cellH*ws.rows
-		scale := pickScale(opt.scale, ws)
+		scale = pickScale(opt.scale, ws)
 		viewH = float64(viewPx) / scale
-		offset, maxOff := followOffset(list, viewH)
+		followTo, maxOff := followOffset(list, viewH)
 		maxOffset = maxOff
-		if !follow {
+		if follow {
+			target = followTo
+		} else {
 			manual = math.Max(0, math.Min(manual, maxOffset))
-			offset = manual
+			target = manual
 		}
-		lastOffset = offset
-		offsetPx := int(math.Round(offset * scale))
+		if !started || resized {
+			shown = target // nothing to glide from
+			started = true
+		}
+		shown = math.Max(0, math.Min(shown, maxOffset))
+		if shown != target {
+			startAnim()
+		}
+		offsetPx := int(math.Round(shown * scale))
 
 		if force || changed || !cur.valid || offsetPx < cur.top || offsetPx+viewPx > cur.top+cur.height {
 			_, contentH := layout(list)
@@ -456,17 +507,28 @@ func runView(name string, opt viewOptions) error {
 				kittyDelete(w, cur.id)
 			}
 			cur = next
-		} else {
-			kittyPlace(w, cur.id, offsetPx-cur.top, widthPx, viewPx, ws.cols, ws.rows)
+		} else if p := [2]int{cur.id, offsetPx - cur.top}; p != placed || force {
+			kittyPlace(w, cur.id, p[1], widthPx, viewPx, ws.cols, ws.rows)
 		}
+		placed = [2]int{cur.id, offsetPx - cur.top}
 		w.Flush()
 	}
 
-	// scrollBy moves the view and stops following the active item. Redraws
-	// wait for the next frame so a burst of trackpad ticks costs one render.
+	// step advances the glide by one frame and redraws.
+	step := func(now time.Time) {
+		shown = easeToward(shown, target, now.Sub(lastStep), scale)
+		lastStep = now
+		if shown == target {
+			stopAnim()
+		}
+		draw(false)
+	}
+
+	// scrollBy moves the target and stops following the active item. The
+	// first frame of the glide is drawn right away, so input never waits.
 	scrollBy := func(k scrollKind) {
 		if follow {
-			follow, manual, anchor = false, lastOffset, activeID(list)
+			follow, manual, anchor = false, target, activeID(list)
 		}
 		page := math.Max(itemPitch, viewH-2*itemPitch)
 		switch k {
@@ -488,14 +550,20 @@ func runView(name string, opt viewOptions) error {
 			manual = maxOffset
 		}
 		manual = math.Max(0, math.Min(manual, maxOffset))
-		scrolled = manual != lastOffset
+		target = manual
+		if shown != target {
+			idle := anim == nil
+			startAnim()
+			if idle {
+				step(time.Now())
+			}
+		}
 	}
 
 	draw(true)
 	tick := time.NewTicker(150 * time.Millisecond)
 	defer tick.Stop()
-	frame := time.NewTicker(16 * time.Millisecond)
-	defer frame.Stop()
+	defer stopAnim()
 	// Re-ask for colors now and then too: not every theme change sends a 2031 report.
 	recolor := time.NewTicker(2 * time.Second)
 	defer recolor.Stop()
@@ -503,10 +571,8 @@ func runView(name string, opt viewOptions) error {
 		select {
 		case <-tick.C:
 			draw(false)
-		case <-frame.C:
-			if scrolled {
-				draw(false)
-			}
+		case now := <-animC:
+			step(now)
 		case <-recolor.C:
 			queryColors(w)
 			w.Flush()
@@ -545,7 +611,7 @@ func runView(name string, opt viewOptions) error {
 				scrollBy(scrollBottom)
 			case ev.key == 'f': // follow the active item again
 				follow = true
-				draw(true)
+				draw(false)
 			case ev.key == 'r' || ev.key == 12: // r, Ctrl-L
 				draw(true)
 			}
