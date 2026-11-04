@@ -157,7 +157,7 @@ func TestRender(t *testing.T) {
 	}
 	l, _ := parseMarkdown(sample)
 	r := &renderer{fonts: fonts, scale: 2, pal: lightPalette}
-	img := r.Render(l, 1000, 600)
+	img := r.Render(l, 1000, 600, 0)
 	if img.Bounds().Dx() != 1000 || img.Bounds().Dy() != 600 {
 		t.Fatalf("size = %v", img.Bounds())
 	}
@@ -188,7 +188,8 @@ func TestRenderScrollsToActive(t *testing.T) {
 	l.Groups = []Group{g}
 	l.normalize()
 	r := &renderer{fonts: fonts, scale: 1, pal: lightPalette}
-	img := r.Render(l, 400, 300)
+	off, _ := followOffset(l, 300)
+	img := r.Render(l, 400, 300, off)
 	// The active row's highlight must be on screen somewhere.
 	found := false
 	for y := 0; y < 300 && !found; y++ {
@@ -271,15 +272,20 @@ func TestPickScale(t *testing.T) {
 	}
 }
 
-func TestKittyPlacementPinsCells(t *testing.T) {
+func TestKittyPlacementPinsCellsAndCrops(t *testing.T) {
 	var b strings.Builder
 	w := bufio.NewWriter(&b)
-	if err := kittyImage(w, image.NewRGBA(image.Rect(0, 0, 4, 4)), 7, 42, 19); err != nil {
+	if err := kittyUpload(w, image.NewRGBA(image.Rect(0, 0, 4, 4)), 7); err != nil {
 		t.Fatal(err)
 	}
+	kittyPlace(w, 7, 120, 640, 1302, 42, 19)
 	w.Flush()
-	if !strings.HasPrefix(b.String(), "\x1b_Ga=T,f=100,i=7,p=1,q=2,C=1,c=42,r=19,") {
-		t.Errorf("placement = %q", b.String()[:60])
+	got := b.String()
+	if !strings.HasPrefix(got, "\x1b_Ga=t,f=100,i=7,q=2,") {
+		t.Errorf("upload = %q", got[:40])
+	}
+	if !strings.HasSuffix(got, "\x1b[H\x1b_Ga=p,i=7,p=1,x=0,y=120,w=640,h=1302,c=42,r=19,C=1,q=2\x1b\\") {
+		t.Errorf("placement = %q", got[len(got)-80:])
 	}
 }
 
@@ -294,5 +300,46 @@ func TestSkillInstall(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(got), "---\nname: rexpad\n") {
 		t.Errorf("skill starts %q", string(got[:30]))
+	}
+}
+
+func TestCSIScroll(t *testing.T) {
+	cases := map[string]scrollKind{
+		"<64;10;5M": wheelUp, "<65;10;5M": wheelDown, "<68;1;1M": wheelUp, // Shift+wheel
+		"<0;3;4M": scrollNone, "A": lineUp, "B": lineDown, "5~": pageUp, "6~": pageDown,
+		"H": scrollTop, "F": scrollBottom, "?997;1n": scrollNone,
+	}
+	for in, want := range cases {
+		if got := csiScroll(in); got != want {
+			t.Errorf("csiScroll(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestRenderHonorsOffset(t *testing.T) {
+	fonts, _ := loadFonts()
+	l := &List{Groups: []Group{{Title: "Long"}}}
+	for i := 0; i < 40; i++ {
+		l.Groups[0].Items = append(l.Groups[0].Items, Item{Text: "item"})
+	}
+	l.normalize()
+	r := &renderer{fonts: fonts, scale: 1, pal: lightPalette}
+	_, maxOff := followOffset(l, 300)
+	if maxOff <= 0 {
+		t.Fatal("a 40-item list should overflow 300pt")
+	}
+	top := r.Render(l, 400, 300, 0)
+	// The header's divider is on screen at offset 0 and gone once scrolled.
+	y := int(marginTop + dividerOffset) // the 1pt divider row at scale 1
+	if top.RGBAAt(200, y) != lightPalette.divider {
+		t.Fatal("divider missing at the top")
+	}
+	if r.Render(l, 400, 300, 200).RGBAAt(200, y) == lightPalette.divider {
+		t.Error("offset didn't scroll the content")
+	}
+	// Offsets past the end clamp instead of showing blank space.
+	a, b := r.Render(l, 400, 300, maxOff), r.Render(l, 400, 300, maxOff+500)
+	if string(a.Pix) != string(b.Pix) {
+		t.Error("offset wasn't clamped to the content")
 	}
 }

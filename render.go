@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"image/draw"
 	"math"
+	"strings"
 	"unicode/utf8"
 
 	"golang.org/x/image/font"
@@ -179,9 +180,39 @@ func layout(l *List) (rows []row, height float64) {
 	return rows, rows[len(rows)-1].center + itemPitch/2 + marginBot
 }
 
+// followOffset is the scroll offset, in points, that keeps the first active
+// item (or else the first open one) in view with some context above it, and
+// the largest offset the content allows in a view viewH points tall.
+func followOffset(l *List, viewH float64) (offset, maxOffset float64) {
+	rows, contentH := layout(l)
+	maxOffset = math.Max(0, contentH-viewH)
+	if maxOffset == 0 {
+		return 0, 0
+	}
+	focus := -1.0
+	for _, rw := range rows {
+		if rw.kind == rowItem && rw.item.Status == StatusActive {
+			focus = rw.center
+			break
+		}
+	}
+	if focus < 0 {
+		for _, rw := range rows {
+			if rw.kind == rowItem && rw.item.Status != StatusDone {
+				focus = rw.center
+				break
+			}
+		}
+	}
+	if focus < 0 {
+		return 0, maxOffset
+	}
+	return math.Max(0, math.Min(focus-viewH/3, maxOffset)), maxOffset
+}
+
 // Render draws the list into an image of exactly widthPx x heightPx device
-// pixels, scrolled so the first active item (or the first open one) is visible.
-func (r *renderer) Render(l *List, widthPx, heightPx int) *image.RGBA {
+// pixels, scrolled down by offset points (clamped to the content).
+func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, widthPx, heightPx))
 	draw.Draw(img, img.Bounds(), image.NewUniform(r.pal.bg), image.Point{}, draw.Src)
 
@@ -191,30 +222,8 @@ func (r *renderer) Render(l *List, widthPx, heightPx int) *image.RGBA {
 		r.text(img, "No tasks yet", marginLeft+textX, marginTop+baselineOffset, false, r.pal.doneText, 0)
 		return img
 	}
-
-	// Scroll: keep the focus row on screen with some context above it.
 	viewH := float64(heightPx) / s
-	offset := 0.0
-	if contentH > viewH {
-		focus := -1.0
-		for _, rw := range rows {
-			if rw.kind == rowItem && rw.item.Status == StatusActive {
-				focus = rw.center
-				break
-			}
-		}
-		if focus < 0 {
-			for _, rw := range rows {
-				if rw.kind == rowItem && rw.item.Status != StatusDone {
-					focus = rw.center
-					break
-				}
-			}
-		}
-		if focus > 0 {
-			offset = math.Max(0, math.Min(focus-viewH/3, contentH-viewH))
-		}
-	}
+	offset = math.Max(0, math.Min(offset, contentH-viewH))
 
 	left := marginLeft
 	right := float64(widthPx)/s - marginRight
@@ -270,7 +279,7 @@ func (r *renderer) item(img *image.RGBA, it *Item, left, right, cy float64) {
 		if truncated {
 			nx = tx + maxW + noteGap
 		}
-		r.noteIcon(img, nx, by, bg)
+		r.noteIcon(img, nx, by+1/r.scale, bg) // one device pixel below the box top reads as centered
 	}
 }
 
@@ -279,6 +288,7 @@ func (r *renderer) item(img *image.RGBA, it *Item, left, right, cy float64) {
 // text draws s with its baseline at (x, y) points, truncating with an
 // ellipsis to fit maxW when maxW > 0. It returns the drawn advance in points.
 func (r *renderer) text(img *image.RGBA, s string, x, y float64, bold bool, col color.RGBA, maxW float64) (float64, bool) {
+	s = strings.ReplaceAll(s, "\t", " ") // fonts have no tab glyph
 	face := r.fonts.face(bold, fontSize*r.scale)
 	track := tracking * fontSize * r.scale
 	truncated := false

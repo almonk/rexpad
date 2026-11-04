@@ -200,7 +200,8 @@ func run(args []string) error {
 			}
 		}
 		r := &renderer{fonts: fonts, scale: *scale, pal: pal}
-		img := r.Render(l, int(*width**scale), int(h**scale))
+		off, _ := followOffset(l, h)
+		img := r.Render(l, int(*width**scale), int(h**scale), off)
 		f, err := os.Create(*out)
 		if err != nil {
 			return err

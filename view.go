@@ -54,12 +54,8 @@ func pickScale(flag float64, ws winSize) float64 {
 	return max(1, math.Round(float64(ws.ypix)/float64(ws.rows)/17*2)/2)
 }
 
-// kittyImage writes img at the cursor with the kitty graphics protocol and
-// leaves the cursor where it was (C=1), so a full-height image never scrolls.
-// It pins the placement to cols x rows cells: a client whose cells differ in
-// pixels from the size the pty reports (a phone viewing the pane) scales the
-// image to the grid instead of drawing it past the edge.
-func kittyImage(w *bufio.Writer, img image.Image, id, cols, rows int) error {
+// kittyUpload transmits img as image id without placing it.
+func kittyUpload(w *bufio.Writer, img image.Image, id int) error {
 	var buf bytes.Buffer
 	enc := png.Encoder{CompressionLevel: png.BestSpeed}
 	if err := enc.Encode(&buf, img); err != nil {
@@ -74,12 +70,25 @@ func kittyImage(w *bufio.Writer, img image.Image, id, cols, rows int) error {
 			more = 1
 		}
 		if i == 0 {
-			fmt.Fprintf(w, "\x1b_Ga=T,f=100,i=%d,p=1,q=2,C=1,c=%d,r=%d,m=%d;%s\x1b\\", id, cols, rows, more, data[i:end])
+			fmt.Fprintf(w, "\x1b_Ga=t,f=100,i=%d,q=2,m=%d;%s\x1b\\", id, more, data[i:end])
 		} else {
 			fmt.Fprintf(w, "\x1b_Gm=%d;%s\x1b\\", more, data[i:end])
 		}
 	}
 	return nil
+}
+
+// kittyPlace shows the w x h pixel window of image id starting at row y,
+// at the top-left cell. Placing again with the same placement ID moves the
+// window, which is how the viewer scrolls without re-sending pixels.
+//
+// The placement is pinned to cols x rows cells, so a client whose cells
+// differ in pixels from the size the pty reports (a phone viewing the pane)
+// scales it to the grid instead of drawing past the edge. C=1 leaves the
+// cursor alone, so a full-height placement never scrolls the screen.
+func kittyPlace(w *bufio.Writer, id, y, width, height, cols, rows int) {
+	fmt.Fprintf(w, "\x1b[H\x1b_Ga=p,i=%d,p=1,x=0,y=%d,w=%d,h=%d,c=%d,r=%d,C=1,q=2\x1b\\",
+		id, y, width, height, cols, rows)
 }
 
 func kittyDelete(w *bufio.Writer, id int) {
@@ -94,6 +103,54 @@ type termEvent struct {
 	key    byte
 	osc    string
 	scheme bool
+	scroll scrollKind // a wheel tick or a navigation key sent as an escape sequence
+}
+
+type scrollKind int
+
+const (
+	scrollNone scrollKind = iota
+	wheelUp
+	wheelDown
+	lineUp
+	lineDown
+	pageUp
+	pageDown
+	scrollTop
+	scrollBottom
+)
+
+// csiScroll maps a finished CSI sequence (without the ESC [) to a scroll:
+// SGR mouse wheel reports (mode 1006), arrows, Page Up/Down, Home/End.
+func csiScroll(seq string) scrollKind {
+	if strings.HasPrefix(seq, "<") && strings.HasSuffix(seq, "M") {
+		btn, err := strconv.Atoi(strings.SplitN(seq[1:], ";", 2)[0])
+		if err != nil {
+			return scrollNone
+		}
+		switch btn &^ (4 | 8 | 16) { // ignore Shift, Alt, Ctrl
+		case 64:
+			return wheelUp
+		case 65:
+			return wheelDown
+		}
+		return scrollNone
+	}
+	switch seq {
+	case "A":
+		return lineUp
+	case "B":
+		return lineDown
+	case "5~":
+		return pageUp
+	case "6~":
+		return pageDown
+	case "H", "1~", "7~":
+		return scrollTop
+	case "F", "4~", "8~":
+		return scrollBottom
+	}
+	return scrollNone
 }
 
 // readTerminal splits stdin into keys and terminal replies.
@@ -155,6 +212,8 @@ func readTerminal(events chan<- termEvent) {
 				if c >= 0x40 && c <= 0x7e {
 					if strings.HasPrefix(string(seq), "?997;") {
 						events <- termEvent{scheme: true}
+					} else if k := csiScroll(string(seq)); k != scrollNone {
+						events <- termEvent{scroll: k}
 					}
 					state = normal
 				}
@@ -241,6 +300,18 @@ func (tc termColors) palette(theme string) palette {
 	return themedPalette(fg, tc.bg, accent)
 }
 
+// activeID is the first active item's ID, or 0.
+func activeID(l *List) int {
+	for _, g := range l.Groups {
+		for _, it := range g.Items {
+			if it.Status == StatusActive {
+				return it.ID
+			}
+		}
+	}
+	return 0
+}
+
 func runView(name string, opt viewOptions) error {
 	fonts, err := loadFonts()
 	if err != nil {
@@ -259,32 +330,41 @@ func runView(name string, opt viewOptions) error {
 	go readTerminal(events)
 
 	w := bufio.NewWriterSize(out, 1<<16)
-	// Alternate screen, hidden cursor, and color-scheme change reports (2031).
-	fmt.Fprint(w, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?2031h")
+	// Alternate screen, hidden cursor, color-scheme change reports (2031), and
+	// mouse reports in SGR form (1000, 1006) so the wheel scrolls the list.
+	fmt.Fprint(w, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?2031h\x1b[?1000h\x1b[?1006h")
 	w.Flush()
 	defer func() {
-		fmt.Fprint(w, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[?2031l\x1b[?25h\x1b[?1049l")
+		fmt.Fprint(w, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[?1006l\x1b[?1000l\x1b[?2031l\x1b[?25h\x1b[?1049l")
 		w.Flush()
 	}()
 
-	// Wait briefly for the theme so the first frame has the right colors.
+	// Wait for the theme so the first frame has the right colors. Rex answers
+	// from the app, which may not have attached a new pane yet, so keep asking
+	// until it does. A terminal that never answers gets the light design.
 	var colors termColors
 	queryColors(w)
 	w.Flush()
 	if opt.theme == "terminal" || opt.theme == "auto" {
-		deadline := time.After(time.Second)
+		deadline := time.After(3 * time.Second)
+		retry := time.NewTicker(250 * time.Millisecond)
 	wait:
 		for !(colors.hasFg && colors.hasBg && colors.hasBlue) {
 			select {
 			case ev, open := <-events:
 				if !open {
+					retry.Stop()
 					return nil
 				}
 				colors.apply(ev.osc)
+			case <-retry.C:
+				queryColors(w)
+				w.Flush()
 			case <-deadline:
 				break wait
 			}
 		}
+		retry.Stop()
 	}
 	pal := colors.palette(opt.theme)
 
@@ -293,12 +373,31 @@ func runView(name string, opt viewOptions) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
+	// The viewer renders the whole list as one tall "sheet" image, uploads it
+	// once, and scrolls by moving the placement's window over it. A sheet is
+	// re-rendered only when the list, size, or theme changes, or when a very
+	// long list scrolls past the part of it that was rendered.
+	const maxSheetPx = 8192
+	type sheet struct {
+		id, top, height int // image ID; first content row and height, in pixels
+		valid           bool
+	}
 	var (
 		lastStamp string
 		lastSize  winSize
 		imgID     = 1
-		curID     = 0
+		cur       sheet
 		list      = &List{}
+
+		// Scrolling: the view follows the active item until the user scrolls,
+		// and goes back to following when a different item becomes active.
+		follow     = true
+		manual     float64 // offset in points while not following
+		lastOffset float64
+		maxOffset  float64
+		viewH      float64
+		anchor     int // the active item when the user started scrolling
+		scrolled   bool
 	)
 	draw := func(force bool) {
 		stamp := ""
@@ -306,38 +405,97 @@ func runView(name string, opt viewOptions) error {
 			stamp = fmt.Sprint(st.ModTime().UnixNano(), st.Size())
 		}
 		ws := getWinSize(int(out.Fd()))
-		if !force && stamp == lastStamp && ws == lastSize {
+		changed := stamp != lastStamp || ws != lastSize
+		if !force && !scrolled && !changed {
 			return
 		}
+		scrolled = false
 		if stamp != lastStamp {
 			if l, err := loadList(path); err == nil {
 				list = l
+				if !follow && activeID(list) != anchor {
+					follow = true
+				}
 			} // A bad write keeps the last good list on screen.
 		}
 		lastStamp, lastSize = stamp, ws
 
 		// Whole cells only, so the image is exactly the grid it's pinned to.
 		cellW, cellH := ws.xpix/ws.cols, ws.ypix/ws.rows
-		r := &renderer{fonts: fonts, scale: pickScale(opt.scale, ws), pal: pal}
-		img := r.Render(list, cellW*ws.cols, cellH*ws.rows)
+		widthPx, viewPx := cellW*ws.cols, cellH*ws.rows
+		scale := pickScale(opt.scale, ws)
+		viewH = float64(viewPx) / scale
+		offset, maxOff := followOffset(list, viewH)
+		maxOffset = maxOff
+		if !follow {
+			manual = math.Max(0, math.Min(manual, maxOffset))
+			offset = manual
+		}
+		lastOffset = offset
+		offsetPx := int(math.Round(offset * scale))
 
-		// Place the new image, then drop the old one, so updates don't flash.
-		next := imgID
-		imgID++
-		fmt.Fprint(w, "\x1b[H")
-		if err := kittyImage(w, img, next, ws.cols, ws.rows); err != nil {
-			return
+		if force || changed || !cur.valid || offsetPx < cur.top || offsetPx+viewPx > cur.top+cur.height {
+			_, contentH := layout(list)
+			contentPx := int(math.Ceil(contentH * scale))
+			height := max(viewPx, min(contentPx, maxSheetPx))
+			top := 0
+			if contentPx > height {
+				// Center the view in the rendered part of a very long list.
+				top = max(0, min(offsetPx-(height-viewPx)/2, contentPx-height))
+			}
+			r := &renderer{fonts: fonts, scale: scale, pal: pal}
+			img := r.Render(list, widthPx, height, float64(top)/scale)
+			next := sheet{id: imgID, top: top, height: height, valid: true}
+			imgID++
+			if err := kittyUpload(w, img, next.id); err != nil {
+				return
+			}
+			// Place the new sheet, then drop the old one, so updates don't flash.
+			kittyPlace(w, next.id, offsetPx-next.top, widthPx, viewPx, ws.cols, ws.rows)
+			if cur.valid {
+				kittyDelete(w, cur.id)
+			}
+			cur = next
+		} else {
+			kittyPlace(w, cur.id, offsetPx-cur.top, widthPx, viewPx, ws.cols, ws.rows)
 		}
-		if curID != 0 {
-			kittyDelete(w, curID)
-		}
-		curID = next
 		w.Flush()
+	}
+
+	// scrollBy moves the view and stops following the active item. Redraws
+	// wait for the next frame so a burst of trackpad ticks costs one render.
+	scrollBy := func(k scrollKind) {
+		if follow {
+			follow, manual, anchor = false, lastOffset, activeID(list)
+		}
+		page := math.Max(itemPitch, viewH-2*itemPitch)
+		switch k {
+		case wheelUp:
+			manual -= itemPitch / 2
+		case wheelDown:
+			manual += itemPitch / 2
+		case lineUp:
+			manual -= itemPitch
+		case lineDown:
+			manual += itemPitch
+		case pageUp:
+			manual -= page
+		case pageDown:
+			manual += page
+		case scrollTop:
+			manual = 0
+		case scrollBottom:
+			manual = maxOffset
+		}
+		manual = math.Max(0, math.Min(manual, maxOffset))
+		scrolled = manual != lastOffset
 	}
 
 	draw(true)
 	tick := time.NewTicker(150 * time.Millisecond)
 	defer tick.Stop()
+	frame := time.NewTicker(16 * time.Millisecond)
+	defer frame.Stop()
 	// Re-ask for colors now and then too: not every theme change sends a 2031 report.
 	recolor := time.NewTicker(2 * time.Second)
 	defer recolor.Stop()
@@ -345,6 +503,10 @@ func runView(name string, opt viewOptions) error {
 		select {
 		case <-tick.C:
 			draw(false)
+		case <-frame.C:
+			if scrolled {
+				draw(false)
+			}
 		case <-recolor.C:
 			queryColors(w)
 			w.Flush()
@@ -365,8 +527,25 @@ func runView(name string, opt viewOptions) error {
 						draw(true)
 					}
 				}
+			case ev.scroll != scrollNone:
+				scrollBy(ev.scroll)
 			case ev.key == 'q' || ev.key == 3 || ev.key == 4: // q, Ctrl-C, Ctrl-D
 				return nil
+			case ev.key == 'k':
+				scrollBy(lineUp)
+			case ev.key == 'j':
+				scrollBy(lineDown)
+			case ev.key == 'b' || ev.key == 'u':
+				scrollBy(pageUp)
+			case ev.key == ' ' || ev.key == 'd':
+				scrollBy(pageDown)
+			case ev.key == 'g':
+				scrollBy(scrollTop)
+			case ev.key == 'G':
+				scrollBy(scrollBottom)
+			case ev.key == 'f': // follow the active item again
+				follow = true
+				draw(true)
 			case ev.key == 'r' || ev.key == 12: // r, Ctrl-L
 				draw(true)
 			}

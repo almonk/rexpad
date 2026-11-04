@@ -92,6 +92,19 @@ rexpad show
 A pane opens on the right, taking 30% of the width, without taking focus. Run
 `rexpad next` a few times and watch it update.
 
+### Scrolling
+
+Long lists follow the active item on their own. To look around yourself, use
+the trackpad or mouse wheel over the pane, or click into it and use the keys:
+
+| Keys | |
+| --- | --- |
+| `j` / `k`, arrows | one row |
+| Space / `b`, Page Down / Page Up | one page |
+| `g` / `G`, Home / End | top / bottom |
+| `f` | follow the active item again (also happens when the agent starts a new item) |
+| `q` | close the viewer |
+
 ## Using it with an agent
 
 You don't need to do anything once the skill is installed: when you give the
@@ -178,12 +191,13 @@ Agent skill
 - **State**: each list is a JSON file in `~/.local/state/rexpad`. Commands
   read it, change it, and write it back atomically.
 - **The viewer** (`rexpad view`) is what runs in the pane. It checks the file
-  every 150 ms, renders the list to a PNG at the pane's pixel size, and sends
-  it with the kitty graphics protocol. Each image is pinned to the pane's
+  every 150 ms and renders the whole list to one tall PNG at the pane's pixel
+  density, which it uploads once with the kitty graphics protocol. Scrolling
+  moves the placement's crop window over that image, so it costs a few bytes
+  per step rather than a new image. The placement is pinned to the pane's
   columns and rows, so a client with different cell metrics (such as Rex on a
-  phone) scales it to fit instead of overflowing. New frames are placed before
-  old ones are deleted, so updates don't flicker. Long lists scroll to keep the
-  active item in view.
+  phone) scales it to fit instead of overflowing. New images are placed before
+  old ones are deleted, so updates don't flicker.
 - **Theme**: the viewer asks the terminal for its foreground, background, and
   blue (OSC 10, 11, and 4), and mixes the grays from those in the same
   proportions as the light design. It asks again every 2 seconds and whenever
