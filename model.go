@@ -23,6 +23,19 @@ type Item struct {
 	ID     int    `json:"id"`
 	Text   string `json:"text"`
 	Status Status `json:"status"`
+
+	// lines are where Text's wrapped lines start, as byte offsets, for the
+	// width the list was last wrapped at (see renderer.wrapList); nil is
+	// one line.
+	lines []int
+}
+
+// extra is how much taller than one line the item is, in points.
+func (it *Item) extra() float64 {
+	if len(it.lines) < 2 {
+		return 0
+	}
+	return float64(len(it.lines)-1) * lineH
 }
 
 type Group struct {
@@ -35,6 +48,8 @@ type Group struct {
 type List struct {
 	Groups []Group `json:"groups"`
 	NextID int     `json:"next_id"`
+
+	wrapKey string // the width and scale its items are wrapped for
 }
 
 func (g *Group) progress() float64 {

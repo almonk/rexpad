@@ -1061,10 +1061,113 @@ func TestDotsFollowTheText(t *testing.T) {
 	if w := float64(maxX-minX+1) / 2; w < dotsW-1 || w > dotsW+1 {
 		t.Errorf("dots are %vpt wide, want %v", w, dotsW)
 	}
-	// A long item is cut short to leave them room.
+	// A long item wraps, leaving them room after its last line.
 	l2, _ := parseMarkdown("- [~] " + strings.Repeat("very long item text ", 10) + "\n")
 	right := 200/2.0 - marginRight
+	r.wrapList(l2, right)
 	if x := r.dotsX(&l2.Groups[0].Items[0], right, 1); x+dotsW > right+0.01 {
 		t.Errorf("dots end at %v, past the row's end at %v", x+dotsW, right)
+	}
+}
+
+func TestItemsWrap(t *testing.T) {
+	fonts, _ := loadFonts()
+	r := &renderer{fonts: fonts, scale: 2, pal: lightPalette}
+	text := "Order the CNC cells and conveyors before the steel frame goes up"
+	maxW := 160.0
+	starts := r.wrapText(text, maxW)
+	if len(starts) < 2 {
+		t.Fatalf("a long item stayed on one line: %v", starts)
+	}
+	it := &Item{Text: text, lines: starts}
+	lines, _ := itemLines(it)
+	if got := strings.Join(lines, " "); got != text {
+		t.Errorf("lines %q don't add back up to the text", lines)
+	}
+	for _, line := range lines {
+		if w := r.textWidth(line, false, 0); w > maxW+0.5 {
+			t.Errorf("line %q is %vpt, over %v", line, w, maxW)
+		}
+		if strings.HasPrefix(line, " ") || line == "" {
+			t.Errorf("line %q starts with a space or is empty", line)
+		}
+	}
+	// Breaks fall between words.
+	for _, line := range lines[:len(lines)-1] {
+		if !strings.Contains(text, line+" ") {
+			t.Errorf("line %q ends mid-word", line)
+		}
+	}
+	// A word longer than a line breaks mid-word rather than overflowing.
+	long := strings.Repeat("x", 80)
+	for _, line := range func() []string { l, _ := itemLines(&Item{Text: long, lines: r.wrapText(long, maxW)}); return l }() {
+		if w := r.textWidth(line, false, 0); w > maxW+0.5 {
+			t.Errorf("long word line is %vpt", w)
+		}
+	}
+	// Short text is one line.
+	if s := r.wrapText("Ship", maxW); len(s) != 1 {
+		t.Errorf("short text wrapped: %v", s)
+	}
+
+	// The layout makes room for the extra lines, and the next item moves down.
+	l, _ := parseMarkdown("# Plan\n- [ ] " + text + "\n- [ ] next\n")
+	before, _ := layout(l)
+	r.wrapList(l, wrapWidthInverse(maxW))
+	after, _ := layout(l)
+	ex := l.Groups[0].Items[0].extra()
+	if ex <= 0 || after[2].center-before[2].center != ex || after[1].extra != ex {
+		t.Errorf("extra %v; next item moved %v", ex, after[2].center-before[2].center)
+	}
+	// Wrapping again for the same width does nothing.
+	if r.wrapList(l, wrapWidthInverse(maxW)) {
+		t.Error("rewrapped for the same width")
+	}
+}
+
+// wrapWidthInverse is the row end that gives lines maxW wide.
+func wrapWidthInverse(maxW float64) float64 { return maxW + marginLeft + textX + dotsGap + dotsW }
+
+func TestFindHighlightsOnWrappedLines(t *testing.T) {
+	fonts, _ := loadFonts()
+	l, _ := parseMarkdown("- [ ] Order the CNC cells and conveyors early since the lead time is long\n")
+	r := &renderer{fonts: fonts, scale: 2, pal: lightPalette}
+	const W = 360 // narrow enough to wrap
+	plain := r.Render(l, W, 120, 0)
+	it := &l.Groups[0].Items[0]
+	if len(it.lines) < 2 {
+		t.Fatalf("didn't wrap: %v", it.lines)
+	}
+	var f findState
+	f.setQuery(l, "lead")
+	r.marks = f.spans()
+	marked := r.Render(l, W, 120, 0)
+	rows, _ := layout(l)
+	// "lead" is on a later line: that line changes, the first doesn't.
+	line := func(i int) (changed bool) {
+		y0 := int((rows[0].center - 9 + float64(i)*lineH) * 2)
+		for y := y0; y < y0+36; y++ {
+			for x := 0; x < W; x++ {
+				if plain.RGBAAt(x, y) != marked.RGBAAt(x, y) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	lines, _ := itemLines(it)
+	at := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "lead") {
+			at = i
+		}
+	}
+	if at < 1 {
+		t.Fatalf("lead isn't on a later line: %q", lines)
+	}
+	for i := range lines {
+		if line(i) != (i == at) {
+			t.Errorf("line %d (%q) changed: %v; only line %d should", i, lines[i], line(i), at)
+		}
 	}
 }

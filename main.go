@@ -190,6 +190,10 @@ func run(args []string) error {
 		if *theme == "dark" {
 			pal = darkPalette
 		}
+		// The working dots frozen with the middle one lit, so a still reads
+		// as the spinner.
+		r := &renderer{fonts: fonts, scale: *scale, pal: pal, dots: true, dotsPhase: dotStagger + dotCycle/4}
+		r.wrapList(l, float64(int(*width**scale))/(*scale)-marginRight) // before measuring its height
 		h := *height
 		if h == 0 {
 			_, h = layout(l)
@@ -197,7 +201,6 @@ func run(args []string) error {
 				h = 60
 			}
 		}
-		r := &renderer{fonts: fonts, scale: *scale, pal: pal, dots: true}
 		off, _ := followOffset(l, h)
 		img := r.Render(l, int(*width**scale), int(h**scale), off)
 		f, err := os.Create(*out)

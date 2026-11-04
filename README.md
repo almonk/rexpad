@@ -9,7 +9,7 @@ highlight to whatever it's doing now. You can see the plan, the progress, and
 what's left at a glance, without scrolling back through the transcript.
 
 <p align="center">
-  <img src="docs/rexpad-light.png" width="420" alt="rexpad in a light theme: three groups with progress rings, two done items, and an active item highlighted in blue">
+  <img src="docs/rexpad-light.png" width="420" alt="rexpad in a light theme: three groups, two with progress rings, two done items, and an active item highlighted in blue with its working dots">
   <img src="docs/rexpad-dark.png" width="420" alt="The same list in a dark theme">
 </p>
 

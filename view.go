@@ -425,9 +425,23 @@ func runView(name string, opt viewOptions) error {
 		ws := getWinSize(int(out.Fd()))
 		resized := ws != lastSize
 		changed := stamp != lastStamp || resized
+		// wrap wraps l's items for the pane's width, which layout needs
+		// before anything is positioned.
+		wrap := func(l *List) bool {
+			sc := pickScale(opt.scale, ws)
+			widthPx := ws.xpix / ws.cols * ws.cols
+			return (&renderer{fonts: fonts, scale: sc}).wrapList(l, float64(widthPx)/sc-marginRight)
+		}
+		if wrap(list) && geo != nil {
+			// The width changed and rows rewrapped: start the rows from rest.
+			geoTo, geoToH = geoFor(list, find.vis)
+			geo = append([]rowGeo(nil), geoTo...)
+			geoGen++
+		}
 		if stamp != lastStamp {
 			if l, err := loadList(path); err == nil {
 				old, oldGeo := list, geo
+				wrap(l)
 				list = l
 				if find.open {
 					// Don't pull the view away from what's being found.
@@ -483,16 +497,17 @@ func runView(name string, opt viewOptions) error {
 		}
 		// Point the outline at the current match, where that row is now.
 		if m, ok := find.current(); find.open && ok {
-			y := 0.0
+			y, ex := 0.0, 0.0
+			if rows, _ := layout(list); m.row < len(rows) {
+				y, ex = rows[m.row].center, rows[m.row].extra
+			}
 			if geo != nil {
 				y = geo[m.row].center
-			} else if rows, _ := layout(list); m.row < len(rows) {
-				y = rows[m.row].center
 			}
 			if ring.alpha == 0 {
-				ring = ringGeo{y: y, grow: ringGrow} // appearing: start out wide and faint
+				ring = ringGeo{y: y, grow: ringGrow, extra: ex} // appearing: start out wide and faint
 			}
-			ringTo = ringGeo{y: y, alpha: 1}
+			ringTo = ringGeo{y: y, alpha: 1, extra: ex}
 		} else {
 			ringTo = ringGeo{y: ring.y, grow: ring.grow}
 		}
@@ -734,7 +749,7 @@ func runView(name string, opt viewOptions) error {
 						}
 						c = geo[i].center
 					}
-					want = append(want, struct{ center, x float64 }{c, measure.dotsX(rw.item, right, 1)})
+					want = append(want, struct{ center, x float64 }{c + rw.extra, measure.dotsX(rw.item, right, 1)})
 				}
 			}
 			fadePx := 0

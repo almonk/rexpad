@@ -41,6 +41,7 @@ const (
 	dividerOffset = 15.0 // top of the divider below the header center
 	firstItemGap  = 38.0 // header center to first item center
 	itemPitch     = 28.0
+	lineH         = 18.0 // between a wrapped item's lines
 	groupGap      = 57.0 // last item center to next header center
 	emptyGroupGap = 48.0 // header center to next header center when a group has no items
 
@@ -221,7 +222,8 @@ const (
 
 type row struct {
 	kind   rowKind
-	center float64 // points from the top of the content
+	center float64 // the first line's center, in points from the top of the content
+	extra  float64 // how much taller than one line it is: its wrapped lines
 	group  *Group
 	item   *Item
 }
@@ -276,24 +278,29 @@ func layoutOpen(l *List, open []float64) (rows []row, height float64) {
 		if g.Title == "" {
 			cursor = y - itemPitch/2 // an untitled group's items start where its header would be
 		}
-		sum := 0.0
+		sum, room := 0.0, 0.0 // how many items show, and the room they take
 		for ii := range g.Items {
 			wi := w(len(rows))
-			rows = append(rows, row{kind: rowItem, center: cursor + wi*itemPitch/2, group: g, item: &g.Items[ii]})
+			it := &g.Items[ii]
+			ex := it.extra()
+			h := itemPitch + ex // a wrapped item is taller by its extra lines
+			// Folding, the item stays centered in its shrinking slot.
+			rows = append(rows, row{kind: rowItem, center: cursor + wi*h/2 - ex/2, extra: ex, group: g, item: it})
 			if wi > 0 {
-				bottom = math.Max(bottom, cursor+wi*itemPitch+marginBot)
+				bottom = math.Max(bottom, cursor+wi*h+marginBot)
 			}
-			cursor += wi * itemPitch
+			cursor += wi * h
 			sum += wi
+			room += wi * h
 		}
 		// How far the next group starts: the same gaps as the plain layout
 		// at whole steps, blended in between.
 		some := math.Min(1, sum)
 		if g.Title != "" {
 			full := firstItemGap - itemPitch + groupGap
-			y += head * (emptyGroupGap + some*(full-emptyGroupGap) + sum*itemPitch)
+			y += head * (emptyGroupGap + some*(full-emptyGroupGap) + room)
 		} else {
-			y += some*(groupGap-itemPitch) + sum*itemPitch
+			y += some*(groupGap-itemPitch) + room
 		}
 	}
 	return rows, bottom
@@ -338,6 +345,7 @@ func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image
 	}
 
 	s := r.scale
+	r.wrapList(l, float64(widthPx)/s-marginRight)
 	rows, contentH := layout(l)
 	if r.icons != nil {
 		r.iconKeys = groupKeys(l)
@@ -363,7 +371,7 @@ func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image
 			center, open = geo[i].center, geo[i].open
 		}
 		cy := center - offset
-		if open <= 0 || cy < -itemPitch || cy > viewH+itemPitch {
+		if open <= 0 || cy < -itemPitch-rw.extra || cy > viewH+itemPitch {
 			continue
 		}
 		if open >= 1 {
@@ -372,7 +380,7 @@ func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image
 		}
 		// A row folding open or shut: draw it on its own layer, then show
 		// the middle of it, as tall as it is open, faded to match.
-		top, bot := cy-itemPitch/2, cy+itemPitch/2
+		top, bot := cy-itemPitch/2, cy+itemPitch/2+rw.extra
 		if rw.kind == rowHeader {
 			top, bot = cy-14, cy+dividerOffset+2
 		}
@@ -388,7 +396,7 @@ func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image
 		draw.DrawMask(img, clip, layer, clip.Min, fade, image.Point{}, draw.Over)
 	}
 	if g := r.ring; g != nil && g.alpha > 0 {
-		r.outline(img, left, right, g.y-offset, g.grow, g.alpha)
+		r.outline(img, left, right, g.y-offset, g.extra, g.grow, g.alpha)
 	}
 	if r.empty != "" && r.emptyAlpha > 0 {
 		col := premul(r.pal.doneText, r.emptyAlpha)
@@ -419,8 +427,9 @@ func (r *renderer) row(img *image.RGBA, i int, rw row, left, right, cy float64) 
 }
 
 func (r *renderer) item(img *image.RGBA, it *Item, left, right, cy float64, marks []span) {
+	ex := it.extra()
 	if it.Status == StatusActive {
-		r.fillRoundRect(img, left-activeInset, cy-itemPitch/2+2, right+activeInset, cy+itemPitch/2-2, 6, r.pal.activeBg)
+		r.fillRoundRect(img, left-activeInset, cy-itemPitch/2+2, right+activeInset, cy+itemPitch/2-2+ex, 6, r.pal.activeBg)
 	}
 
 	bx, by := left+boxCenter-boxSize/2, cy-boxSize/2
@@ -441,13 +450,23 @@ func (r *renderer) item(img *image.RGBA, it *Item, left, right, cy float64, mark
 		col = r.pal.doneText
 	}
 	tx := left + textX
-	show := r.spinShow(it)
-	// The working dots follow the text; a long item is cut short to fit them.
-	maxW := right - tx - show*(dotsGap+dotsW)
-	if show > 0 && r.dots {
-		r.workingDots(img, r.dotsX(it, right, show), cy, r.dotsPhase, show)
+	// The wrapped lines, each with the find highlights that fall in it.
+	lines, starts := itemLines(it)
+	for i, line := range lines {
+		a := starts[i]
+		var lm []span
+		for _, m := range marks {
+			s, e := max(m.start, a), min(m.end, a+len(line))
+			if s < e {
+				lm = append(lm, span{s - a, e - a, m.current})
+			}
+		}
+		r.textMarked(img, line, tx, cy+baselineOffset+float64(i)*lineH, false, col, 0, lm)
 	}
-	r.textMarked(img, it.Text, tx, cy+baselineOffset, false, col, maxW, marks)
+	// The working dots follow the last line.
+	if show := r.spinShow(it); show > 0 && r.dots {
+		r.workingDots(img, r.dotsX(it, right, show), cy+ex, r.dotsPhase, show)
+	}
 }
 
 // --- text ---------------------------------------------------------------
@@ -648,10 +667,10 @@ func (r *renderer) fillRect(img *image.RGBA, x0, y0, x1, y1 float64, col color.R
 // outline rings the row centered at cy in the accent: the find match that
 // n / N are on. grow points it out past the row on every side, and alpha
 // fades it, for when it settles in.
-func (r *renderer) outline(img *image.RGBA, left, right, cy, grow, alpha float64) {
+func (r *renderer) outline(img *image.RGBA, left, right, cy, extra, grow, alpha float64) {
 	const w = 1.5
 	x0, y0 := left-activeInset-grow, cy-itemPitch/2+2-grow
-	x1, y1 := right+activeInset+grow, cy+itemPitch/2-2+grow
+	x1, y1 := right+activeInset+grow, cy+itemPitch/2-2+extra+grow
 	inner := roundRect(x0+w, y0+w, x1-w, y1-w, 6+grow-w)
 	for i, j := 0, len(inner)-1; i < j; i, j = i+1, j-1 {
 		inner[i], inner[j] = inner[j], inner[i] // the other way round makes a hole

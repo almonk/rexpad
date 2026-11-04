@@ -52,11 +52,11 @@ func (r *renderer) workingDots(img *image.RGBA, x, cy, phase, alpha float64) {
 	}
 }
 
-// dotsX is where its working dots start, in points: just after its text,
-// as drawn in a row whose content ends at right.
+// dotsX is where its working dots start, in points: just after its last
+// wrapped line (wrapping leaves them room), in a row ending at right.
 func (r *renderer) dotsX(it *Item, right, show float64) float64 {
-	tx := marginLeft + textX
-	return tx + r.textWidth(it.Text, false, right-tx-show*(dotsGap+dotsW)) + dotsGap
+	lines, _ := itemLines(it)
+	return marginLeft + textX + r.textWidth(lines[len(lines)-1], false, 0) + dotsGap
 }
 
 // spinShow is how far its working dots are in: from r.spins while they

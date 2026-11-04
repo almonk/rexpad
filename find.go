@@ -297,7 +297,7 @@ func easeGeo(l *List, g, to []rowGeo, dt time.Duration) bool {
 // ringGeo is where the current match's outline is: the center line of the
 // row it's around (in content points), how opaque it is, and how far out
 // past the row it reaches while it settles in.
-type ringGeo struct{ y, alpha, grow float64 }
+type ringGeo struct{ y, alpha, grow, extra float64 } // extra: the row's wrapped lines
 
 // ringGrow is how far out the outline starts when it appears, like a macOS
 // focus ring closing in on its control.
@@ -325,6 +325,7 @@ func easeRingBy(g, to ringGeo, dt time.Duration, scale float64, tau time.Duratio
 		y:     near(g.y, to.y, 0.5/scale),
 		alpha: near(g.alpha, to.alpha, 0.01),
 		grow:  near(g.grow, to.grow, 0.5/scale),
+		extra: near(g.extra, to.extra, 0.5/scale),
 	}
 }
 
