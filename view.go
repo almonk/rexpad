@@ -2,15 +2,15 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/base64"
 	"fmt"
 	"image"
 	"image/color"
-	"image/png"
+	"maps"
 	"math"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -55,26 +55,8 @@ func pickScale(flag float64, ws winSize) float64 {
 }
 
 // kittyUpload transmits img as image id without placing it.
-func kittyUpload(w *bufio.Writer, img image.Image, id int) error {
-	var buf bytes.Buffer
-	enc := png.Encoder{CompressionLevel: png.BestSpeed}
-	if err := enc.Encode(&buf, img); err != nil {
-		return err
-	}
-	data := base64.StdEncoding.EncodeToString(buf.Bytes())
-	const chunk = 4096
-	for i := 0; i < len(data); i += chunk {
-		end := min(i+chunk, len(data))
-		more := 0
-		if end < len(data) {
-			more = 1
-		}
-		if i == 0 {
-			fmt.Fprintf(w, "\x1b_Ga=t,f=100,i=%d,q=2,m=%d;%s\x1b\\", id, more, data[i:end])
-		} else {
-			fmt.Fprintf(w, "\x1b_Gm=%d;%s\x1b\\", more, data[i:end])
-		}
-	}
+func kittyUpload(w *bufio.Writer, img *image.RGBA, id int) error {
+	kittyUploadEncoded(w, encodeImage(img), id)
 	return nil
 }
 
@@ -87,8 +69,28 @@ func kittyUpload(w *bufio.Writer, img image.Image, id int) error {
 // scales it to the grid instead of drawing past the edge. C=1 leaves the
 // cursor alone, so a full-height placement never scrolls the screen.
 func kittyPlace(w *bufio.Writer, id, y, width, height, cols, rows int) {
-	fmt.Fprintf(w, "\x1b[H\x1b_Ga=p,i=%d,p=1,x=0,y=%d,w=%d,h=%d,c=%d,r=%d,C=1,q=2\x1b\\",
-		id, y, width, height, cols, rows)
+	kittyPlaceAt(w, 1, id, y, width, height, cols, rows)
+}
+
+// kittyPlaceCell places image id's whole width x height at cell (row, col),
+// pinned to cols x rows cells, at z-index z (above the list for z > 0). It
+// saves and restores the cursor like kittyPlaceAt.
+func kittyPlaceCell(w *bufio.Writer, row, col, id, width, height, cols, rows, z int) {
+	fmt.Fprintf(w, "\x1b7\x1b[%d;%dH\x1b_Ga=p,i=%d,p=1,x=0,y=0,w=%d,h=%d,c=%d,r=%d,z=%d,C=1,q=2\x1b\\\x1b8",
+		row, col, id, width, height, cols, rows, z)
+}
+
+// kittyPlaceAt is kittyPlace with the image's top edge on cell row row
+// (1-based). It saves and restores the cursor around the move, so a cursor
+// sitting in the find field never visibly leaves it (cursor shaders would
+// see it jump).
+func kittyPlaceAt(w *bufio.Writer, row, id, y, width, height, cols, rows int) {
+	cup := "\x1b[H"
+	if row > 1 {
+		cup = fmt.Sprintf("\x1b[%d;1H", row)
+	}
+	fmt.Fprintf(w, "\x1b7%s\x1b_Ga=p,i=%d,p=1,x=0,y=%d,w=%d,h=%d,c=%d,r=%d,C=1,q=2\x1b\\\x1b8",
+		cup, id, y, width, height, cols, rows)
 }
 
 func kittyDelete(w *bufio.Writer, id int) {
@@ -97,73 +99,10 @@ func kittyDelete(w *bufio.Writer, id int) {
 
 // --- terminal input and colors -------------------------------------------
 
-// termEvent is one thing read from the terminal: a key press, an OSC reply,
-// or a color-scheme change report (CSI ? 997 ; n n, mode 2031).
-type termEvent struct {
-	key    byte
-	osc    string
-	scheme bool
-	scroll scrollKind // a wheel tick or a navigation key sent as an escape sequence
-}
-
-type scrollKind int
-
-const (
-	scrollNone scrollKind = iota
-	wheelUp
-	wheelDown
-	lineUp
-	lineDown
-	pageUp
-	pageDown
-	scrollTop
-	scrollBottom
-)
-
-// csiScroll maps a finished CSI sequence (without the ESC [) to a scroll:
-// SGR mouse wheel reports (mode 1006), arrows, Page Up/Down, Home/End.
-func csiScroll(seq string) scrollKind {
-	if strings.HasPrefix(seq, "<") && strings.HasSuffix(seq, "M") {
-		btn, err := strconv.Atoi(strings.SplitN(seq[1:], ";", 2)[0])
-		if err != nil {
-			return scrollNone
-		}
-		switch btn &^ (4 | 8 | 16) { // ignore Shift, Alt, Ctrl
-		case 64:
-			return wheelUp
-		case 65:
-			return wheelDown
-		}
-		return scrollNone
-	}
-	switch seq {
-	case "A":
-		return lineUp
-	case "B":
-		return lineDown
-	case "5~":
-		return pageUp
-	case "6~":
-		return pageDown
-	case "H", "1~", "7~":
-		return scrollTop
-	case "F", "4~", "8~":
-		return scrollBottom
-	}
-	return scrollNone
-}
-
-// readTerminal splits stdin into keys and terminal replies.
+// readTerminal decodes stdin into key presses and terminal replies.
 func readTerminal(events chan<- termEvent) {
-	const (
-		normal = iota
-		esc
-		osc
-		oscEsc
-		csi
-	)
-	state := normal
-	var seq []byte
+	var d keyDecoder
+	emit := func(ev termEvent) { events <- ev }
 	buf := make([]byte, 4096)
 	for {
 		n, err := os.Stdin.Read(buf)
@@ -171,54 +110,8 @@ func readTerminal(events chan<- termEvent) {
 			close(events)
 			return
 		}
-		for _, c := range buf[:n] {
-			switch state {
-			case normal:
-				if c == 0x1b {
-					state = esc
-				} else {
-					events <- termEvent{key: c}
-				}
-			case esc:
-				seq = seq[:0]
-				switch c {
-				case ']':
-					state = osc
-				case '[':
-					state = csi
-				default:
-					state = normal
-				}
-			case osc:
-				switch c {
-				case 0x07:
-					events <- termEvent{osc: string(seq)}
-					state = normal
-				case 0x1b:
-					state = oscEsc
-				default:
-					seq = append(seq, c)
-				}
-			case oscEsc:
-				if c == '\\' {
-					events <- termEvent{osc: string(seq)}
-					state = normal
-				} else {
-					seq = append(seq, 0x1b, c)
-					state = osc
-				}
-			case csi:
-				seq = append(seq, c)
-				if c >= 0x40 && c <= 0x7e {
-					if strings.HasPrefix(string(seq), "?997;") {
-						events <- termEvent{scheme: true}
-					} else if k := csiScroll(string(seq)); k != scrollNone {
-						events <- termEvent{scroll: k}
-					}
-					state = normal
-				}
-			}
-		}
+		d.feed(buf[:n], emit)
+		d.flush(emit)
 	}
 }
 
@@ -304,7 +197,11 @@ func (tc termColors) palette(theme string) palette {
 // (exponential smoothing). Rapid wheel ticks keep moving the target, so the
 // view keeps gliding instead of stepping; a single tick settles in ~150 ms.
 const (
-	animFrame = 8 * time.Millisecond // ~120 Hz, a crop move costs a few bytes
+	colorPoll   = 250 * time.Millisecond // how often to ask for the theme's colors
+	colorSettle = 30 * time.Millisecond  // for the rest of a theme's replies to arrive
+
+	animFrame = 8 * time.Millisecond  // ~120 Hz, a crop move costs a few bytes
+	foldFrame = 15 * time.Millisecond // ~60 Hz for frames that are new pictures
 	easeTau   = 45 * time.Millisecond
 )
 
@@ -349,12 +246,14 @@ func runView(name string, opt viewOptions) error {
 	go readTerminal(events)
 
 	w := bufio.NewWriterSize(out, 1<<16)
-	// Alternate screen, hidden cursor, color-scheme change reports (2031), and
-	// mouse reports in SGR form (1000, 1006) so the wheel scrolls the list.
-	fmt.Fprint(w, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?2031h\x1b[?1000h\x1b[?1006h")
+	// Alternate screen, hidden cursor, color-scheme change reports (2031),
+	// mouse reports in SGR form (1000, 1006) so the wheel scrolls the list,
+	// bracketed paste (2004), and the kitty keyboard protocol's disambiguate
+	// flag (> 1 u) so Command and Option keys reach the find field.
+	fmt.Fprint(w, "\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J\x1b[?2031h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[>1u")
 	w.Flush()
 	defer func() {
-		fmt.Fprint(w, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[?1006l\x1b[?1000l\x1b[?2031l\x1b[?25h\x1b[?1049l")
+		fmt.Fprint(w, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[<u\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?2031l\x1b[?25h\x1b[?1049l")
 		w.Flush()
 	}()
 
@@ -386,6 +285,18 @@ func runView(name string, opt viewOptions) error {
 		retry.Stop()
 	}
 	pal := colors.palette(opt.theme)
+	// Following the terminal's theme, the list has no background of its own,
+	// so the pane's shows through (Rex may draw it differently from the
+	// color it reports). The fixed light and dark themes paint theirs.
+	clear := opt.theme == "terminal" || opt.theme == "auto"
+	// drawPal is the palette images are drawn with: see-through grays when
+	// clear. pal itself stays opaque for the find field's terminal colors.
+	drawPal := func() palette {
+		if clear {
+			return pal.seeThrough()
+		}
+		return pal
+	}
 
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
@@ -399,6 +310,7 @@ func runView(name string, opt viewOptions) error {
 	const maxSheetPx = 8192
 	type sheet struct {
 		id, top, height int // image ID; first content row and height, in pixels
+		gen             int // the row geometry it was drawn with (geoGen)
 		valid           bool
 	}
 	var (
@@ -406,7 +318,6 @@ func runView(name string, opt viewOptions) error {
 		lastSize  winSize
 		imgID     = 1
 		cur       sheet
-		placed    [2]int // the image ID and crop row last placed, to skip repeats
 		list      = &List{}
 		scale     = 1.0
 
@@ -426,6 +337,48 @@ func runView(name string, opt viewOptions) error {
 		anim     *time.Ticker
 		animC    <-chan time.Time // nil while idle
 		lastStep time.Time
+
+		find     findState
+		findFrom float64 // the view's top when the find started, in points
+		bar      sheet   // the find bar's image; valid while it's placed
+		listRows int     // rows the list's placement covers, under the bar
+		lastFind string  // what the bar last showed, to skip redraws
+
+		// Collapsing: while find is open (and while the list folds back open
+		// after it closes) geo says where each row is and how open, and eases
+		// toward geoTo. Every frame of that is a fresh image; geoGen counts
+		// the changes so the sheet knows when it's stale.
+		geo, geoTo []rowGeo
+		strips     stripSet // mid-fold frames, sent a band at a time
+		// Each group's ring grows in (icons eases toward iconsTo) when
+		// progress starts, and the title slides over to make room.
+		icons, iconsTo map[string]float64
+		// Each active item slides its text over for the working dots
+		// (spins eases toward spinsTo). The dots themselves animate as
+		// their own small images above the list (dotIDs), redrawn at
+		// dotsFPS, so the list doesn't have to be.
+		spins, spinsTo map[int]float64
+		dotsEpoch      = time.Now()
+		dotIDs         []int
+		dotsKey        string
+		sheetImg       *image.RGBA // cur's pixels, to cut the edge fades from
+		bands          [2]int      // the faded top and bottom edge images, 0 for none
+		shownKey       string      // what's on screen, to skip placing it again
+		lastStrip      time.Time   // when the last one went out
+		geoToH         float64
+		geoGen         int
+
+		// The find field is terminal text with the real cursor in it.
+		field    [3]int     // row, first column, and width in cells last written (1-based)
+		cursorAt string     // the cursor's last position sequence, "" while hidden
+		park     = "\x1b[H" // where the hidden cursor rests: where it was last seen
+
+		// The current match's outline glides from match to match, and
+		// settles in when it appears; ring eases toward ringTo.
+		ring, ringTo ringGeo
+
+		// "No matching items" fades in as the last rows fold away.
+		emptyA, emptyTo float64
 	)
 	startAnim := func() {
 		if anim == nil {
@@ -444,7 +397,27 @@ func runView(name string, opt viewOptions) error {
 	// draw brings the screen up to date. It re-renders the sheet only when
 	// the list, size, or theme changed, or the view left the rendered part;
 	// otherwise it only moves the crop window.
-	draw := func(force bool) {
+	// The cursor is either showing in the find field (cursorAt) or hidden
+	// and parked where it was last seen: the top left cell until find is
+	// first used, then the field's last caret position. Cursor shaders track
+	// even a hidden cursor from where it last showed, so it must never rest
+	// anywhere else.
+	//
+	// guarded runs out, which moves the cursor and puts it back, as one
+	// synchronized update (mode 2026), so the terminal never draws the
+	// cursor mid-trip. atHome says out only moves it to the top left: a
+	// cursor parked there doesn't move at all. The updates are kept to these
+	// few bytes: image uploads stream outside them.
+	guarded := func(atHome bool, out func()) {
+		if cursorAt == "" && atHome && park == "\x1b[H" {
+			out()
+			return
+		}
+		fmt.Fprint(w, "\x1b[?2026h")
+		out()
+		fmt.Fprint(w, "\x1b[?2026l")
+	}
+	drawFrame := func(force bool) {
 		stamp := ""
 		if st, err := os.Stat(path); err == nil {
 			stamp = fmt.Sprint(st.ModTime().UnixNano(), st.Size())
@@ -454,8 +427,31 @@ func runView(name string, opt viewOptions) error {
 		changed := stamp != lastStamp || resized
 		if stamp != lastStamp {
 			if l, err := loadList(path); err == nil {
+				old, oldGeo := list, geo
 				list = l
-				if !follow && activeID(list) != anchor {
+				if find.open {
+					// Don't pull the view away from what's being found.
+					find.refresh(list)
+					anchor = activeID(list)
+				}
+				// New rows unfold into place: each row starts as open as it
+				// was (new ones shut) and eases to where it belongs now.
+				geoTo, geoToH = geoFor(list, find.vis)
+				var from []rowGeo
+				if started {
+					from = arrivalGeo(old, oldGeo, list)
+				}
+				if from != nil && !slices.Equal(from, geoTo) {
+					geo = from
+					startAnim()
+				} else if geo != nil {
+					geo = append([]rowGeo(nil), geoTo...)
+					if !find.open {
+						geo = nil
+					}
+				}
+				geoGen++
+				if !find.open && !follow && activeID(list) != anchor {
 					follow = true
 				}
 			} // A bad write keeps the last good list on screen.
@@ -463,12 +459,113 @@ func runView(name string, opt viewOptions) error {
 		lastStamp, lastSize = stamp, ws
 
 		// Whole cells only, so the image is exactly the grid it's pinned to.
+		// The find bar takes whole rows at the bottom, and the list's view
+		// shrinks above it so nothing hides underneath.
 		cellW, cellH := ws.xpix/ws.cols, ws.ypix/ws.rows
-		widthPx, viewPx := cellW*ws.cols, cellH*ws.rows
 		scale = pickScale(opt.scale, ws)
+		barRows := 0
+		if find.open && ws.rows > 1 {
+			barRows = max(1, min(ws.rows-1, int(math.Round(findBarPt*scale/float64(cellH)))))
+		}
+		rows := ws.rows - barRows
+		if rows != listRows {
+			changed, listRows = true, rows
+		}
+		widthPx, viewPx := cellW*ws.cols, cellH*rows
 		viewH = float64(viewPx) / scale
 		followTo, maxOff := followOffset(list, viewH)
 		maxOffset = maxOff
+		contentH := 0.0
+		if geo != nil {
+			// Room for wherever the rows are and wherever they're going.
+			contentH = math.Max(geoHeight(geo), geoToH)
+			maxOffset = math.Max(0, contentH-viewH)
+		}
+		// Point the outline at the current match, where that row is now.
+		if m, ok := find.current(); find.open && ok {
+			y := 0.0
+			if geo != nil {
+				y = geo[m.row].center
+			} else if rows, _ := layout(list); m.row < len(rows) {
+				y = rows[m.row].center
+			}
+			if ring.alpha == 0 {
+				ring = ringGeo{y: y, grow: ringGrow} // appearing: start out wide and faint
+			}
+			ringTo = ringGeo{y: y, alpha: 1}
+		} else {
+			ringTo = ringGeo{y: ring.y, grow: ring.grow}
+		}
+		if ring != ringTo {
+			startAnim()
+		}
+		// Rings: in once anything in the group is under way. A group seen
+		// for the first time starts where it belongs.
+		iconsTo = map[string]float64{}
+		for g, k := range groupKeys(list) {
+			iconsTo[k] = 0
+			if g.progress() > 0 {
+				iconsTo[k] = 1
+			}
+		}
+		if icons == nil {
+			icons = map[string]float64{}
+		}
+		for k, v := range iconsTo {
+			if _, ok := icons[k]; !ok {
+				icons[k] = v
+			}
+		}
+		for k := range icons {
+			if _, ok := iconsTo[k]; !ok {
+				delete(icons, k) // the group is gone
+			}
+		}
+		iconsMoving := !maps.Equal(icons, iconsTo)
+		if iconsMoving {
+			startAnim()
+		}
+		spinsTo = map[int]float64{}
+		for _, g := range list.Groups {
+			for _, it := range g.Items {
+				spinsTo[it.ID] = 0
+				if it.Status == StatusActive {
+					spinsTo[it.ID] = 1
+				}
+			}
+		}
+		if spins == nil {
+			spins = map[int]float64{}
+		}
+		for id, v := range spinsTo {
+			if _, ok := spins[id]; !ok {
+				spins[id] = v // new items start where they belong
+			}
+		}
+		for id := range spins {
+			if _, ok := spinsTo[id]; !ok {
+				delete(spins, id)
+			}
+		}
+		spinsMoving := !maps.Equal(spins, spinsTo)
+		if spinsMoving {
+			startAnim()
+		}
+		emptyTo = 0
+		if find.open && strings.TrimSpace(find.query) != "" && len(find.matches) == 0 {
+			// Wait until the rows have nearly gone, so it doesn't land on them.
+			most := 0.0
+			for _, g := range geo {
+				most = math.Max(most, g.open)
+			}
+			if most < 0.25 {
+				emptyTo = 1
+			}
+		}
+		if emptyA != emptyTo {
+			startAnim()
+		}
+		moving := geo != nil && !slices.Equal(geo, geoTo) || ring != ringTo || emptyA != emptyTo || iconsMoving || spinsMoving
 		if follow {
 			target = followTo
 		} else {
@@ -485,43 +582,345 @@ func runView(name string, opt viewOptions) error {
 		}
 		offsetPx := int(math.Round(shown * scale))
 
-		if force || changed || !cur.valid || offsetPx < cur.top || offsetPx+viewPx > cur.top+cur.height {
-			_, contentH := layout(list)
-			contentPx := int(math.Ceil(contentH * scale))
-			height := max(viewPx, min(contentPx, maxSheetPx))
-			top := 0
-			if contentPx > height {
-				// Center the view in the rendered part of a very long list.
-				top = max(0, min(offsetPx-(height-viewPx)/2, contentPx-height))
+		newRenderer := func() *renderer {
+			r := &renderer{fonts: fonts, scale: scale, pal: drawPal(), marks: find.spans(), geo: geo, geoH: contentH, clear: clear, icons: maps.Clone(icons),
+				spins: maps.Clone(spins), dots: moving, dotsPhase: time.Since(dotsEpoch).Seconds()}
+			if ring.alpha > 0 {
+				g := ring
+				r.ring = &g
 			}
-			r := &renderer{fonts: fonts, scale: scale, pal: pal}
-			img := r.Render(list, widthPx, height, float64(top)/scale)
-			next := sheet{id: imgID, top: top, height: height, valid: true}
-			imgID++
-			if err := kittyUpload(w, img, next.id); err != nil {
-				return
+			r.empty, r.emptyAlpha = "No matching items", emptyA
+			return r
+		}
+		if geo == nil {
+			_, contentH = layout(list)
+		}
+		if moving && !force && time.Since(lastStrip) < foldFrame {
+			// The easing runs every animFrame, but a fresh picture goes out
+			// at most every foldFrame: decoding them is the terminal's cost.
+		} else if moving {
+			// Mid-fold: the view as strips, sending only the ones that changed.
+			lastStrip = time.Now()
+			img := newRenderer().Render(list, widthPx, viewPx, float64(offsetPx)/scale)
+			if fr := fadeRowsFor(scale, cellH, rows); fr > 0 && maxOffset > 0 {
+				top, bot := edgeFades(offsetPx, int(math.Round(maxOffset*scale)), fr*cellH)
+				fadeRows(img, 0, fr*cellH, true, top, clear, pal.bg)
+				fadeRows(img, viewPx-fr*cellH, fr*cellH, false, bot, clear, pal.bg)
 			}
-			// Place the new sheet, then drop the old one, so updates don't flash.
-			kittyPlace(w, next.id, offsetPx-next.top, widthPx, viewPx, ws.cols, ws.rows)
+			todo := strips.changedStrips(img, cellH, rows, fmt.Sprint(widthPx, cellH, ws.cols, rows))
+			ids := make([]int, len(todo))
+			for i, st := range todo {
+				ids[i] = imgID
+				imgID++
+				kittyUploadEncoded(w, st.enc, ids[i])
+			}
+			// Swap them in at once: place the new, drop what they replace.
+			fmt.Fprint(w, "\x1b[?2026h")
+			for i, st := range todo {
+				kittyPlaceAt(w, st.row, ids[i], 0, widthPx, st.h, ws.cols, st.rows)
+				if old := strips.ids[st.k]; old != 0 {
+					kittyDelete(w, old)
+				}
+				strips.ids[st.k], strips.pix[st.k] = ids[i], st.px
+			}
+			for _, id := range append(strips.stale, bands[:]...) {
+				if id != 0 {
+					kittyDelete(w, id)
+				}
+			}
+			strips.stale, bands, shownKey = nil, [2]int{}, ""
 			if cur.valid {
 				kittyDelete(w, cur.id)
+				cur = sheet{}
 			}
-			cur = next
-		} else if p := [2]int{cur.id, offsetPx - cur.top}; p != placed || force {
-			kittyPlace(w, cur.id, p[1], widthPx, viewPx, ws.cols, ws.rows)
+			fmt.Fprint(w, "\x1b[?2026l")
+		} else {
+			replaced := 0 // a sheet this one replaces, to drop once it's placed
+			if force || changed || !cur.valid || cur.gen != geoGen || offsetPx < cur.top || offsetPx+viewPx > cur.top+cur.height {
+				contentPx := int(math.Ceil(contentH * scale))
+				height := max(viewPx, min(contentPx, maxSheetPx))
+				top := 0
+				if contentPx > height {
+					// Center the view in the rendered part of a very long list.
+					top = max(0, min(offsetPx-(height-viewPx)/2, contentPx-height))
+				}
+				img := newRenderer().Render(list, widthPx, height, float64(top)/scale)
+				next := sheet{id: imgID, top: top, height: height, gen: geoGen, valid: true}
+				imgID++
+				if err := kittyUpload(w, img, next.id); err != nil {
+					return
+				}
+				if cur.valid {
+					replaced = cur.id
+				}
+				cur, sheetImg = next, img
+			}
+
+			// Put the sheet's crop on screen, with faded edges cut from it
+			// where there's more to scroll to. Unless it's what's there.
+			sy := offsetPx - cur.top
+			fr := 0
+			if maxOffset > 0 {
+				fr = fadeRowsFor(scale, cellH, rows)
+			}
+			fadePx := fr * cellH
+			top, bot := 0.0, 0.0
+			if fr > 0 {
+				top, bot = edgeFades(offsetPx, int(math.Round(maxOffset*scale)), fadePx)
+			}
+			key := fmt.Sprint(cur.id, sy, fr, top, bot, rows, widthPx, ws.cols)
+			leftovers := strips.active() || len(strips.stale) > 0
+			if replaced != 0 || force || leftovers || key != shownKey {
+				shownKey = key
+				var next [2]int
+				if fr > 0 {
+					edges := []*image.RGBA{
+						fadeBand(sheetImg, sy, fadePx, true, top, clear, pal.bg),
+						fadeBand(sheetImg, sy+viewPx-fadePx, fadePx, false, bot, clear, pal.bg),
+					}
+					for i, e := range edges {
+						next[i] = imgID
+						imgID++
+						kittyUpload(w, e, next[i])
+					}
+				}
+				old := append([]int{replaced}, bands[:]...)
+				old = append(old, strips.ids...)
+				old = append(old, strips.stale...)
+				place := func() {
+					if fr > 0 {
+						kittyPlaceAt(w, 1+fr, cur.id, sy+fadePx, widthPx, viewPx-2*fadePx, ws.cols, rows-2*fr)
+						kittyPlaceAt(w, 1, next[0], 0, widthPx, fadePx, ws.cols, fr)
+						kittyPlaceAt(w, rows-fr+1, next[1], 0, widthPx, fadePx, ws.cols, fr)
+					} else {
+						kittyPlace(w, cur.id, sy, widthPx, viewPx, ws.cols, rows)
+					}
+					// Then drop what that replaced, so nothing flashes.
+					for _, id := range old {
+						if id != 0 {
+							kittyDelete(w, id)
+						}
+					}
+				}
+				if fr == 0 && replaced == 0 && !leftovers && bands == [2]int{} {
+					guarded(true, place) // only the crop moved
+				} else {
+					fmt.Fprint(w, "\x1b[?2026h") // the parts change together
+					place()
+					fmt.Fprint(w, "\x1b[?2026l")
+				}
+				bands, strips = next, stripSet{}
+			}
 		}
-		placed = [2]int{cur.id, offsetPx - cur.top}
+
+		// The working dots: while frames are new pictures they're in them;
+		// otherwise each active item's dots are a small image over the list.
+		{
+			// Where each active row's dots are: its center line, and just
+			// after its text.
+			var want []struct{ center, x float64 }
+			measure := &renderer{fonts: fonts, scale: scale, pal: pal}
+			right := float64(widthPx)/scale - marginRight
+			if !moving {
+				rws, _ := layout(list)
+				for i, rw := range rws {
+					if rw.kind != rowItem || spins[rw.item.ID] < 1 || rw.item.Status != StatusActive {
+						continue
+					}
+					c := rw.center
+					if geo != nil && len(geo) == len(rws) {
+						if geo[i].open < 1 {
+							continue
+						}
+						c = geo[i].center
+					}
+					want = append(want, struct{ center, x float64 }{c, measure.dotsX(rw.item, right, 1)})
+				}
+			}
+			fadePx := 0
+			if maxOffset > 0 {
+				fadePx = fadeRowsFor(scale, cellH, rows) * cellH
+			}
+			frame := int(time.Since(dotsEpoch).Seconds() * dotsFPS)
+			type spot struct {
+				row, col, w, h int
+				x, y           float64
+			}
+			var spots []spot
+			for _, g := range want {
+				y := g.center*scale - float64(offsetPx) // in the view, in pixels
+				if y < float64(fadePx+cellH/2) || y > float64(viewPx-fadePx-cellH/2) || rows < 2 {
+					continue // off screen or in a faded edge
+				}
+				x := g.x * scale
+				c0, c1 := int(x)/cellW, min(ws.cols, int(math.Ceil((x+dotsW*scale)/float64(cellW))))
+				r0 := max(0, min(rows-2, int(y-dotDiameter*scale)/cellH))
+				spots = append(spots, spot{r0 + 1, c0 + 1, c1 - c0, 2, x - float64(c0*cellW), y - float64(r0*cellH)})
+			}
+			key := fmt.Sprint(frame, spots, pal, scale)
+			if len(spots) == 0 {
+				key = ""
+			}
+			if key != dotsKey || force {
+				dotsKey = key
+				r := &renderer{fonts: fonts, scale: scale, pal: drawPal(), clear: clear}
+				var ids []int
+				for _, sp := range spots {
+					img := image.NewRGBA(image.Rect(0, 0, sp.w*cellW, sp.h*cellH))
+					r.workingDots(img, sp.x/scale, sp.y/scale, float64(frame)/dotsFPS, 1)
+					ids = append(ids, imgID)
+					kittyUpload(w, img, imgID)
+					imgID++
+				}
+				if len(ids) > 0 || len(dotIDs) > 0 {
+					fmt.Fprint(w, "\x1b[?2026h")
+					for i, sp := range spots {
+						kittyPlaceCell(w, sp.row, sp.col, ids[i], sp.w*cellW, sp.h*cellH, sp.w, sp.h, 1)
+					}
+					for _, id := range dotIDs {
+						kittyDelete(w, id)
+					}
+					fmt.Fprint(w, "\x1b[?2026l")
+				}
+				dotIDs = ids
+			}
+		}
+
+		// The find bar is its own small image, redrawn when what it shows changes.
+		// It sits on the bar's second-last row, with the drawn magnifier and count
+		// centered on that row around it.
+		e := &find.edit
+		barKey := fmt.Sprint(find.input, e.text, e.cur, e.anchor, find.status(), pal, ws, barRows)
+		clearField := func() {
+			if field[2] > 0 {
+				fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0m%s", field[0], field[1], strings.Repeat(" ", field[2]))
+				field = [3]int{}
+			}
+		}
+		switch {
+		case barRows > 0 && (force || changed || !bar.valid || barKey != lastFind):
+			r := &renderer{fonts: fonts, scale: scale, pal: drawPal(), clear: clear}
+			barPx := cellH * barRows
+			textRow := rows + max(1, barRows-1)                                   // a row up from the bottom when there's room
+			col0 := int(math.Ceil((marginLeft + textX) * scale / float64(cellW))) // 0-based
+			cy := (float64((textRow-rows-1)*cellH) + float64(cellH)/2) / scale
+			img, end := r.findBar(&find, widthPx, barPx, cy, float64(col0*cellW)/scale)
+			next := sheet{id: imgID, height: barPx, valid: true}
+			imgID++
+			if err := kittyUpload(w, img, next.id); err == nil {
+				guarded(false, func() { kittyPlaceAt(w, rows+1, next.id, 0, widthPx, barPx, ws.cols, barRows) })
+				if bar.valid {
+					kittyDelete(w, bar.id)
+				}
+				bar = next
+			}
+			width := max(0, int(math.Floor(end*scale/float64(cellW)))-col0)
+			// Rewriting the field walks the cursor along its row: keep that
+			// out of sight too.
+			fmt.Fprint(w, "\x1b[?2026h")
+			clearField()
+			runs, caret := e.layout(width, find.input)
+			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0m%s\x1b[%d;%dH", textRow, col0+1, strings.Repeat(" ", width), textRow, col0+1)
+			for _, run := range runs {
+				switch {
+				case run.placeholder:
+					c := pal.doneText
+					fmt.Fprintf(w, "\x1b[38;2;%d;%d;%dm", c.R, c.G, c.B)
+				case run.selected:
+					c := mix(pal.accent, pal.bg, 0.6)
+					fmt.Fprintf(w, "\x1b[48;2;%d;%d;%dm", c.R, c.G, c.B)
+				}
+				fmt.Fprint(w, run.text, "\x1b[0m")
+			}
+			field = [3]int{textRow, col0 + 1, width}
+			cursorAt = "" // writing moved it: put it back below
+			if find.input {
+				cursorAt = fmt.Sprintf("\x1b[%d;%dH", textRow, col0+1+caret)
+				park = cursorAt
+				fmt.Fprint(w, cursorAt, "\x1b[?25h")
+			} else {
+				fmt.Fprint(w, "\x1b[?25l", park) // hidden: park it where it was seen
+			}
+			fmt.Fprint(w, "\x1b[?2026l")
+		case barRows == 0 && bar.valid:
+			kittyDelete(w, bar.id)
+			bar = sheet{}
+			fmt.Fprint(w, "\x1b[?2026h\x1b[?25l") // hide it before clearing walks it along the row
+			cursorAt = ""
+			clearField()
+			fmt.Fprint(w, park, "\x1b[?2026l") // and park it where it was seen
+		}
+		lastFind = barKey
+	}
+	draw := func(force bool) {
+		drawFrame(force)
 		w.Flush()
 	}
 
-	// step advances the glide by one frame and redraws.
+	// step advances the glide and the fold by one frame and redraws.
 	step := func(now time.Time) {
-		shown = easeToward(shown, target, now.Sub(lastStep), scale)
+		dt := now.Sub(lastStep)
+		shown = easeToward(shown, target, dt, scale)
 		lastStep = now
-		if shown == target {
+		settled := true
+		if geo != nil && !slices.Equal(geo, geoTo) {
+			settled = easeGeo(list, geo, geoTo, dt)
+			geoGen++
+		}
+		if ring != ringTo {
+			ring = easeRing(ring, ringTo, dt, scale)
+			geoGen++
+			settled = settled && ring == ringTo
+		}
+		for id, to := range spinsTo {
+			if v, ok := spins[id]; ok && v != to {
+				spins[id] = easeRingBy(ringGeo{alpha: v}, ringGeo{alpha: to}, dt, scale, collapseTau).alpha
+				geoGen++
+				settled = settled && spins[id] == to
+			}
+		}
+		for k, to := range iconsTo {
+			if v, ok := icons[k]; ok && v != to {
+				icons[k] = easeRingBy(ringGeo{alpha: v}, ringGeo{alpha: to}, dt, scale, collapseTau).alpha
+				geoGen++
+				settled = settled && icons[k] == to
+			}
+		}
+		if emptyA != emptyTo {
+			emptyA = easeRingBy(ringGeo{alpha: emptyA}, ringGeo{alpha: emptyTo}, dt, scale, collapseTau).alpha
+			geoGen++
+			settled = settled && emptyA == emptyTo
+		}
+		if settled && geo != nil && !find.open {
+			geo = nil // fully open again: back to the plain layout
+			geoGen++
+		}
+		if shown == target && settled {
 			stopAnim()
 		}
 		draw(false)
+	}
+	// refold points the rows at find's current filter and starts them moving.
+	refold := func() {
+		geoTo, geoToH = geoFor(list, find.vis)
+		if len(geo) != len(geoTo) {
+			geo = append([]rowGeo(nil), geoTo...)
+			geoGen++
+		}
+		if !slices.Equal(geo, geoTo) {
+			startAnim()
+		}
+	}
+	// scrollTo glides the view to offset, as if the user had scrolled there.
+	scrollTo := func(offset float64) {
+		if follow {
+			follow, anchor = false, activeID(list)
+		}
+		manual = math.Max(0, offset)
+		target = manual
+		if shown != target {
+			startAnim()
+		}
 	}
 
 	// scrollBy moves the target and stops following the active item. The
@@ -560,13 +959,154 @@ func runView(name string, opt viewOptions) error {
 		}
 	}
 
+	// reveal scrolls the current match into view if it isn't already.
+	reveal := func() {
+		if len(find.matches) == 0 {
+			return
+		}
+		c := geoTo[find.matches[find.cur].row].center // where it's going to be
+		if c >= target+itemPitch && c <= target+viewH-itemPitch {
+			return
+		}
+		scrollTo(math.Min(c-viewH/3, math.Max(0, geoToH-viewH)))
+	}
+	// closeFind folds the whole list back open and keeps the match that was
+	// current in view, so Esc lands you on what you found, in context.
+	closeFind := func() {
+		m, ok := find.current()
+		find = findState{}
+		refold()
+		draw(true) // the bar's rows go back to the list first
+		if ok {
+			scrollTo(math.Max(0, math.Min(geoTo[m.row].center-viewH/3, geoToH-viewH)))
+		} else {
+			scrollTo(findFrom)
+		}
+		draw(false)
+	}
+	// queried re-folds after the query changed and heads for the top.
+	queried := func() {
+		refold()
+		if strings.TrimSpace(find.query) == "" {
+			scrollTo(findFrom)
+		} else {
+			scrollTo(0)
+		}
+		draw(true)
+		reveal()
+	}
+	findStep := func(d int) {
+		find.step(d)
+		draw(true)
+		reveal()
+	}
+	// edited re-runs the find after the field's text changed.
+	edited := func() {
+		find.setQuery(list, find.edit.text)
+		queried()
+	}
+	// findKey handles a key while typing into the find bar. The field takes
+	// what it can; the rest steer the find.
+	findKey := func(k keyPress) {
+		switch {
+		case k.is(keyEscape, 0) || k.is('c', modCtrl) || k.is('g', modCtrl):
+			closeFind()
+			return
+		case k.is(keyEnter, 0):
+			if strings.TrimSpace(find.edit.text) == "" {
+				closeFind()
+				return
+			}
+			find.input = false
+			draw(true)
+			return
+		case k.is(keyUp, 0) || k.is('p', modCtrl):
+			findStep(-1)
+			return
+		case k.is(keyDown, 0) || k.is('n', modCtrl):
+			findStep(1)
+			return
+		}
+		res := find.edit.handle(k)
+		if res.copy != "" {
+			// OSC 52 puts it on the clipboard of the machine you're looking from.
+			fmt.Fprintf(w, "\x1b]52;c;%s\x07", base64.StdEncoding.EncodeToString([]byte(res.copy)))
+		}
+		switch {
+		case res.edited:
+			edited()
+		case res.handled:
+			draw(false) // the caret or selection moved
+		}
+	}
+	startFind := func() {
+		if find.open {
+			// Back into the field with the query selected, like Command-F
+			// in a Mac app: type to replace it, or arrow to edit it.
+			find.input = true
+			find.edit.anchor, find.edit.cur = 0, len(find.edit.text)
+			draw(true)
+			return
+		}
+		findFrom = shown
+		find = findState{open: true, input: true}
+		refold()
+		draw(true)
+	}
+
+	// handleKey acts on a key press and reports whether it quits.
+	handleKey := func(k keyPress) bool {
+		if find.input {
+			findKey(k)
+			return false
+		}
+		switch {
+		case k.is('/', 0) || k.is('f', modCtrl) || k.is('f', modSuper):
+			startFind()
+		case find.open && k.is('n', 0):
+			findStep(1)
+		case find.open && (k.is('N', 0) || k.is('n', modShift)):
+			findStep(-1)
+		case find.open && (k.is(keyEscape, 0) || k.is('c', modCtrl)):
+			closeFind()
+		case k.is('q', 0) || k.is('c', modCtrl) || k.is('d', modCtrl):
+			return true
+		case k.is('k', 0) || k.is(keyUp, 0):
+			scrollBy(lineUp)
+		case k.is('j', 0) || k.is(keyDown, 0):
+			scrollBy(lineDown)
+		case k.is('b', 0) || k.is('u', 0) || k.is(keyPageUp, 0):
+			scrollBy(pageUp)
+		case k.is(' ', 0) || k.is('d', 0) || k.is(keyPageDown, 0):
+			scrollBy(pageDown)
+		case k.is('g', 0) || k.is(keyHome, 0):
+			scrollBy(scrollTop)
+		case k.is('G', 0) || k.is('g', modShift) || k.is(keyEnd, 0):
+			scrollBy(scrollBottom)
+		case k.is('f', 0): // follow the active item again
+			follow = true
+			draw(false)
+		case k.is('r', 0) || k.is('l', modCtrl):
+			draw(true)
+		}
+		return false
+	}
+
 	draw(true)
 	tick := time.NewTicker(150 * time.Millisecond)
 	defer tick.Stop()
 	defer stopAnim()
-	// Re-ask for colors now and then too: not every theme change sends a 2031 report.
-	recolor := time.NewTicker(2 * time.Second)
+	// Re-ask for colors often: switching Rex's theme sends no report (2031
+	// is for the system's light and dark), so asking is how a new theme
+	// shows up. It's three short queries.
+	recolor := time.NewTicker(colorPoll)
 	defer recolor.Stop()
+	// The working dots' frames; a draw with nothing else to do is cheap.
+	dotsTick := time.NewTicker(time.Second / dotsFPS)
+	defer dotsTick.Stop()
+	// A theme change answers in three replies (foreground, background,
+	// blue); wait a moment after the first so they redraw once, together.
+	var repaint <-chan time.Time
 	for {
 		select {
 		case <-tick.C:
@@ -576,6 +1116,16 @@ func runView(name string, opt viewOptions) error {
 		case <-recolor.C:
 			queryColors(w)
 			w.Flush()
+		case <-dotsTick.C:
+			if dotsKey != "" {
+				draw(false)
+			}
+		case <-repaint:
+			repaint = nil
+			if p := colors.palette(opt.theme); p != pal {
+				pal = p
+				draw(true)
+			}
 		case <-winch:
 			draw(true)
 		case ev, open := <-events:
@@ -587,33 +1137,20 @@ func runView(name string, opt viewOptions) error {
 				queryColors(w)
 				w.Flush()
 			case ev.osc != "":
-				if colors.apply(ev.osc) {
-					if p := colors.palette(opt.theme); p != pal {
-						pal = p
-						draw(true)
-					}
+				if colors.apply(ev.osc) && repaint == nil && colors.palette(opt.theme) != pal {
+					repaint = time.After(colorSettle)
 				}
 			case ev.scroll != scrollNone:
 				scrollBy(ev.scroll)
-			case ev.key == 'q' || ev.key == 3 || ev.key == 4: // q, Ctrl-C, Ctrl-D
-				return nil
-			case ev.key == 'k':
-				scrollBy(lineUp)
-			case ev.key == 'j':
-				scrollBy(lineDown)
-			case ev.key == 'b' || ev.key == 'u':
-				scrollBy(pageUp)
-			case ev.key == ' ' || ev.key == 'd':
-				scrollBy(pageDown)
-			case ev.key == 'g':
-				scrollBy(scrollTop)
-			case ev.key == 'G':
-				scrollBy(scrollBottom)
-			case ev.key == 'f': // follow the active item again
-				follow = true
-				draw(false)
-			case ev.key == 'r' || ev.key == 12: // r, Ctrl-L
-				draw(true)
+			case ev.paste != "":
+				if find.input {
+					find.edit.paste(ev.paste)
+					edited()
+				}
+			case ev.key.code != 0:
+				if handleKey(ev.key) {
+					return nil
+				}
 			}
 		case <-quit:
 			return nil

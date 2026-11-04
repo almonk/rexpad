@@ -27,15 +27,12 @@ rexpad set <<'EOF'
 # Fix
 - [ ] Guard the nil session in SidebarView
 - [ ] Add a regression test
-  Cover the restore-on-launch path too
 EOF
 rexpad show
 ```
 
 - `# Heading` starts a group. Group by phase or area; one group is fine.
 - `- [ ]` pending, `- [~]` active (working on it now), `- [x]` done.
-- An indented line under an item is a note. Notes aren't shown as text; the
-  item gets a small page icon, so use them sparingly for items with detail.
 - `show` opens the pane without taking focus and is idempotent: calling it
   again when it's already open does nothing.
 
@@ -84,7 +81,7 @@ when you start unrelated work (then `set` the new plan instead).
   pins the original design's colors instead.
 - `rexpad render -o /path/list.png` writes a PNG of the list, which you can
   read to check what the user sees.
-- `rexpad set --json` accepts `{"groups":[{"title":"...","items":[{"text":"...","status":"pending|active|done","note":"..."}]}]}`.
+- `rexpad set --json` accepts `{"groups":[{"title":"...","items":[{"text":"...","status":"pending|active|done"}]}]}`.
 - Outside Rex (`$REX_SERVER` unset), `show` fails with a message. The list
   commands still work; skip the pane.
 - The pane's process is `rexpad view`; pressing `q` in it closes the viewer.

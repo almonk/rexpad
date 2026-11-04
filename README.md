@@ -103,7 +103,26 @@ the trackpad or mouse wheel over the pane, or click into it and use the keys:
 | Space / `b`, Page Down / Page Up | one page |
 | `g` / `G`, Home / End | top / bottom |
 | `f` | follow the active item again (also happens when the agent starts a new item) |
+| `/`, Ctrl-F | find |
 | `q` | close the viewer |
+
+### Finding
+
+The list is drawn as an image, so the terminal's own find can't see its
+text. Press `/` (or Ctrl-F) in the pane to open rexpad's find bar instead.
+
+The query is fuzzy: its letters have to appear in order, but not next to each
+other, so `bld` finds "build". Spaces split it into terms that must all
+match, in any order. Case is ignored unless you type a capital. As you type,
+the list folds down to the matching items, each kept under its group's header,
+and the matched letters are highlighted. The match you're on gets an outline.
+
+| Keys | |
+| --- | --- |
+| Enter | stop typing; the list stays filtered |
+| `n` / `N`, or Up / Down and Ctrl-N / Ctrl-P while typing | next / previous match |
+| Esc | close find: the list unfolds and keeps the match you were on in view |
+| `/` again | back into the field with the query selected |
 
 ## Using it with an agent
 
@@ -119,7 +138,6 @@ rexpad set <<'EOF'          # write the whole plan
 # Fix
 - [~] Guard the missing session in SidebarView
 - [ ] Add a regression test
-  Cover the restore-on-launch path too
 EOF
 rexpad show                 # open the pane (does nothing if it's already open)
 rexpad next                 # finish the current item, start the next
@@ -134,8 +152,6 @@ rexpad done 4
 - [ ] pending item
 - [~] active item (working on it now; [>] and [/] work too)
 - [x] done item
-  An indented line under an item is its note. Notes aren't shown as text;
-  the item gets a small page icon.
 ```
 
 Each `# Group` gets a progress ring that fills as its items are done, with
@@ -160,12 +176,12 @@ Writing the whole list
 
 Changing items
   group TITLE                    add a group; later adds go to it
-  add [-g GROUP] [-n NOTE] TEXT  add an item, prints its ID
+  add [-g GROUP] TEXT            add an item, prints its ID
   start ID                       make ID the active item
   done [ID...]                   check items off (no ID: the active item)
   next                           finish the active item, start the next one
   undo ID...                     mark pending again
-  edit ID TEXT / note ID [TEXT] / rm ID...
+  edit ID TEXT / rm ID...
   progress GROUP PCT|auto        pin a group's ring, or go back to counting items
 
 Agent skill
@@ -198,6 +214,10 @@ Agent skill
   columns and rows, so a client with different cell metrics (such as Rex on a
   phone) scales it to fit instead of overflowing. New images are placed before
   old ones are deleted, so updates don't flicker.
+- **Find**: rows fold away like an accordion. Only how open each row is
+  eases; where the rows sit follows from that, so folding neighbors never
+  overlap. Mid-fold, every frame is a new image the size of the view, about
+  60 a second. Once the rows settle, the viewer goes back to one tall sheet.
 - **Theme**: the viewer asks the terminal for its foreground, background, and
   blue (OSC 10, 11, and 4), and mixes the grays from those in the same
   proportions as the light design. It asks again every 2 seconds and whenever

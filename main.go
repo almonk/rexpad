@@ -23,7 +23,7 @@ Showing the list
   show [--below] [--ratio PCT] [--theme T]   open the viewer beside your pane (30% by default, no focus change); idempotent
   hide                                       close the viewer pane
   view [--theme terminal|light|dark] [--scale N]
-                                             run the viewer in this terminal (q to quit)
+                                             run the viewer in this terminal (/ finds, q quits)
   render -o FILE.png [--width PT] [--height PT] [--scale N] [--theme T]
                                              write a PNG of the list
 
@@ -34,13 +34,12 @@ Writing the whole list
 
 Changing items
   group TITLE                   add a group (no-op if it exists); later adds go to it
-  add [-g GROUP] [-n NOTE] TEXT add an item (to the last group unless -g); prints its ID
+  add [-g GROUP] TEXT           add an item (to the last group unless -g); prints its ID
   start ID                      mark ID active (others active become pending; --also keeps them)
   done [ID...]                  mark done (no ID: the active items)
   next                          finish the active item and start the next open one
   undo ID...                    mark pending
   edit ID TEXT                  change an item's text
-  note ID [TEXT]                set or clear an item's note (shows a page icon)
   rm ID...                      delete items
   progress GROUP PCT|auto       pin a group's ring fill (0-100), or go back to counting items
 
@@ -49,7 +48,6 @@ Markdown checklist for set:
   - [ ] pending item
   - [~] active item
   - [x] done item
-    An indented line under an item is its note.
 
 Agent skill
   skill install [--dir DIR]     install the skill for Claude Code (~/.claude/skills), or into DIR
@@ -199,7 +197,7 @@ func run(args []string) error {
 				h = 60
 			}
 		}
-		r := &renderer{fonts: fonts, scale: *scale, pal: pal}
+		r := &renderer{fonts: fonts, scale: *scale, pal: pal, dots: true}
 		off, _ := followOffset(l, h)
 		img := r.Render(l, int(*width**scale), int(h**scale), off)
 		f, err := os.Create(*out)
@@ -280,7 +278,6 @@ func run(args []string) error {
 	case "add":
 		fs := flag.NewFlagSet("add", flag.ContinueOnError)
 		group := fs.String("g", "", "group title (prefix) or 1-based index")
-		note := fs.String("n", "", "note")
 		active := fs.Bool("start", false, "add it as the active item")
 		if err := fs.Parse(args); err != nil {
 			return err
@@ -310,7 +307,7 @@ func run(args []string) error {
 			if *active {
 				st = StatusActive
 			}
-			g.Items = append(g.Items, Item{ID: id, Text: text, Status: st, Note: *note})
+			g.Items = append(g.Items, Item{ID: id, Text: text, Status: st})
 			return nil
 		})
 		if err == nil {
@@ -413,23 +410,6 @@ func run(args []string) error {
 				return fmt.Errorf("no item %d", ns[0])
 			}
 			it.Text = strings.Join(args[1:], " ")
-			return nil
-		})
-
-	case "note":
-		if len(args) < 1 {
-			return errors.New("note needs an ID")
-		}
-		ns, err := ids(args[:1])
-		if err != nil {
-			return err
-		}
-		return mutate(func(l *List) error {
-			it := l.find(ns[0])
-			if it == nil {
-				return fmt.Errorf("no item %d", ns[0])
-			}
-			it.Note = strings.Join(args[1:], " ")
 			return nil
 		})
 

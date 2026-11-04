@@ -23,7 +23,6 @@ type Item struct {
 	ID     int    `json:"id"`
 	Text   string `json:"text"`
 	Status Status `json:"status"`
-	Note   string `json:"note,omitempty"`
 }
 
 type Group struct {
@@ -215,7 +214,8 @@ var (
 //	- [ ] pending item
 //	- [~] active item        ([>] and [/] also mean active)
 //	- [x] done item
-//	  An indented line under an item is its note.
+//
+// Indented lines under an item are skipped.
 func parseMarkdown(src string) (*List, error) {
 	l := &List{NextID: 1}
 	var cur *Group
@@ -230,11 +230,7 @@ func parseMarkdown(src string) (*List, error) {
 			l.Groups = append(l.Groups, Group{Title: headingRE.FindStringSubmatch(trimmed)[1]})
 			cur, last = &l.Groups[len(l.Groups)-1], nil
 		case indented && last != nil:
-			note := strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
-			if last.Note != "" {
-				last.Note += "\n"
-			}
-			last.Note += note
+			continue // detail under an item isn't kept
 		default:
 			text, status := "", StatusPending
 			if m := itemRE.FindStringSubmatch(trimmed); m != nil {
@@ -291,11 +287,6 @@ func (l *List) markdown(withIDs bool) string {
 				fmt.Fprintf(&b, " {#%d}", it.ID)
 			}
 			b.WriteString("\n")
-			for _, nl := range strings.Split(it.Note, "\n") {
-				if nl != "" {
-					fmt.Fprintf(&b, "  %s\n", nl)
-				}
-			}
 		}
 	}
 	return b.String()

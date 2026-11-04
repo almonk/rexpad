@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
@@ -22,10 +23,12 @@ const (
 	// apply it on their own.
 	tracking = -0.011 // em
 
-	marginLeft  = 16.0
-	marginRight = 16.0
-	marginTop   = 22.0 // center line of the first group's header
-	marginBot   = 16.0
+	// No padding of its own: the margins are just enough that the active
+	// row's highlight (activeInset past the content) meets the pane's edges.
+	marginLeft  = activeInset
+	marginRight = activeInset
+	marginTop   = itemPitch/2 - 2 // center line of the first row
+	marginBot   = 0.0
 
 	iconRadius     = 7.75 // group progress ring, outer
 	iconRingWidth  = 1.65
@@ -46,18 +49,11 @@ const (
 	boxStroke = 1.0
 	boxCenter = 8.5 // checkbox center from the content's left edge
 
-	noteW       = 7.8
-	noteH       = 11.0
-	noteGap     = 6.0 // text frame end to note icon
-	noteTrail   = 8.5 // note icon to the right edge
-	noteFold    = 4.0
-	noteStroke  = 1.0
-	noteCorner  = 1.5
 	activeInset = 6.0 // active row highlight extends this far left of the content edge
 )
 
 type palette struct {
-	bg, title, text, doneText, divider, box, note, accent, activeBg, check color.RGBA
+	bg, title, text, doneText, divider, box, accent, activeBg, check color.RGBA
 }
 
 var lightPalette = palette{
@@ -67,7 +63,6 @@ var lightPalette = palette{
 	doneText: rgb(150, 153, 158),
 	divider:  rgb(230, 232, 236),
 	box:      rgb(193, 195, 198),
-	note:     rgb(183, 186, 190),
 	accent:   rgb(49, 95, 189),
 	activeBg: rgb(232, 238, 249),
 	check:    rgb(255, 255, 255),
@@ -80,7 +75,6 @@ var darkPalette = palette{
 	doneText: rgb(128, 131, 137),
 	divider:  rgb(58, 60, 64),
 	box:      rgb(96, 99, 105),
-	note:     rgb(108, 111, 117),
 	accent:   rgb(84, 136, 238),
 	activeBg: rgb(37, 49, 72),
 	check:    rgb(255, 255, 255),
@@ -92,13 +86,7 @@ func rgb(r, g, b uint8) color.RGBA { return color.RGBA{r, g, b, 255} }
 // the foreground color, grays mixed from foreground toward background in the
 // same proportions as the reference, and the theme's blue as the accent.
 func themedPalette(fg, bg, accent color.RGBA) palette {
-	dark := luminance(bg) < 0.18
-	// Fractions of the way from fg to bg, measured on the light reference.
-	doneT, dividerT, boxT, noteT := 0.56, 0.895, 0.74, 0.70
-	if dark {
-		// Dim grays read darker on a dark background; keep them visible.
-		doneT, dividerT, boxT, noteT = 0.48, 0.84, 0.62, 0.58
-	}
+	doneT, dividerT, boxT := grayMix(bg)
 	check := rgb(255, 255, 255)
 	if luminance(accent) > 0.45 {
 		check = bg
@@ -110,11 +98,35 @@ func themedPalette(fg, bg, accent color.RGBA) palette {
 		doneText: mix(fg, bg, doneT),
 		divider:  mix(fg, bg, dividerT),
 		box:      mix(fg, bg, boxT),
-		note:     mix(fg, bg, noteT),
 		accent:   accent,
 		activeBg: mix(accent, bg, 0.84),
 		check:    check,
 	}
+}
+
+// grayMix is how far from the foreground toward the background each gray
+// sits: done text, dividers, checkboxes.
+func grayMix(bg color.RGBA) (doneT, dividerT, boxT float64) {
+	if luminance(bg) < 0.18 {
+		// Dim grays read darker on a dark background; keep them visible.
+		return 0.48, 0.84, 0.62
+	}
+	// Measured on the light reference.
+	return 0.56, 0.895, 0.74
+}
+
+// seeThrough is a themed palette for drawing with no background: each gray
+// is the foreground at the opacity that gives the same gray over the
+// background, and the active row is the accent at its share, so they blend
+// with whatever the pane really shows underneath.
+func (p palette) seeThrough() palette {
+	doneT, dividerT, boxT := grayMix(p.bg)
+	q := p
+	q.doneText = premul(p.text, 1-doneT)
+	q.divider = premul(p.text, 1-dividerT)
+	q.box = premul(p.text, 1-boxT)
+	q.activeBg = premul(p.accent, 0.16)
+	return q
 }
 
 func mix(a, b color.RGBA, t float64) color.RGBA {
@@ -135,9 +147,68 @@ func luminance(c color.RGBA) float64 {
 }
 
 type renderer struct {
-	fonts *fontSet
-	scale float64
-	pal   palette
+	fonts      *fontSet
+	scale      float64
+	pal        palette
+	marks      map[int][]span // find matches to highlight, by row index
+	empty      string         // a message over the list, such as when nothing matches
+	emptyAlpha float64        // how far it has faded in
+	// geo, when it has a row for each of layout's rows, says where each row
+	// is and how open it is, for collapsing; geoH is the content height then.
+	geo  []rowGeo
+	geoH float64
+	// ring is the current match's outline, drawn over the rows where it is
+	// on its way to; nil draws none.
+	ring *ringGeo
+	// spins, by item ID, is how far each item has slid over for its
+	// working dots while that animates. dots draws the dots too, at
+	// dotsPhase seconds in; the viewer leaves them out of the sheet and
+	// shows them as their own image, so they can animate cheaply.
+	spins     map[int]float64
+	dots      bool
+	dotsPhase float64
+	// icons, by groupKeys, is how far each group's ring is in while it
+	// animates; iconKeys is groupKeys of the list being drawn.
+	icons    map[string]float64
+	iconKeys map[*Group]string
+	// clear leaves the background transparent, so the pane's own shows
+	// through. Its palette should be seeThrough, and tints are see-through
+	// accent instead of mixed colors.
+	clear bool
+}
+
+// premul is c (opaque) at opacity a, premultiplied as image.RGBA wants.
+func premul(c color.RGBA, a float64) color.RGBA {
+	a = math.Max(0, math.Min(1, a))
+	f := func(v uint8) uint8 { return uint8(math.Round(float64(v) * a)) }
+	return color.RGBA{f(c.R), f(c.G), f(c.B), uint8(math.Round(255 * a))}
+}
+
+// tint is the accent laid over the background at opacity a: a mixed color
+// on a painted background, see-through accent on a clear one. The two look
+// the same over the same background.
+func (r *renderer) tint(a float64) color.RGBA {
+	if r.clear {
+		return premul(r.pal.accent, a)
+	}
+	return mix(r.pal.accent, r.pal.bg, 1-a)
+}
+
+func reversed(pts [][2]float64) [][2]float64 {
+	out := make([][2]float64, len(pts))
+	for i, p := range pts {
+		out[len(pts)-1-i] = p
+	}
+	return out
+}
+
+// fillRing fills outer with inner cut out of it: the inner contour runs the
+// other way round, which makes a hole, so nothing paints the background.
+func (r *renderer) fillRing(img *image.RGBA, outer, inner [][2]float64, col color.RGBA) {
+	p := r.path(img)
+	p.poly(outer)
+	p.poly(reversed(inner))
+	p.fill(col)
 }
 
 // layout positions every row so the viewer can scroll to the active item.
@@ -155,29 +226,77 @@ type row struct {
 	item   *Item
 }
 
-func layout(l *List) (rows []row, height float64) {
+func layout(l *List) (rows []row, height float64) { return layoutVis(l, nil) }
+
+// layoutVis lays out every row, but only the rows in vis take up room (all
+// of them when vis is nil).
+func layoutVis(l *List, vis []bool) (rows []row, height float64) {
+	if vis == nil {
+		return layoutOpen(l, nil)
+	}
+	open := make([]float64, len(vis))
+	for i, v := range vis {
+		if v {
+			open[i] = 1
+		}
+	}
+	return layoutOpen(l, open)
+}
+
+// layoutOpen is the layout with each row taking up its share of room: open
+// is 1 for a row that shows, 0 for one folded away, and in between while it
+// folds (all 1 when open is nil). Rows stack like an accordion, so folding
+// rows shrink into their own slots and never overlap their neighbors. With
+// only 0s and 1s it's exactly the layout of the rows that show.
+func layoutOpen(l *List, open []float64) (rows []row, height float64) {
+	w := func(i int) float64 {
+		if open == nil {
+			return 1
+		}
+		if i < len(open) {
+			return math.Max(0, math.Min(1, open[i]))
+		}
+		return 0
+	}
 	y := marginTop // center of the next group's header
+	bottom := 0.0  // the lowest edge of anything showing
 	for gi := range l.Groups {
 		g := &l.Groups[gi]
+		head := 1.0
 		if g.Title != "" {
-			rows = append(rows, row{kind: rowHeader, center: y, group: g})
-			if len(g.Items) == 0 {
-				y += emptyGroupGap
-				continue
+			head = w(len(rows))
+			// A folding header rises a little into the gap above it.
+			rows = append(rows, row{kind: rowHeader, center: y - (1-head)*itemPitch/2, group: g})
+			if head > 0 {
+				bottom = math.Max(bottom, rows[len(rows)-1].center+(itemPitch/2)*head+marginBot)
 			}
-			y += firstItemGap
 		}
-		// An untitled group's items start where its header would be.
+		// Items stack from the top of the first item's slot.
+		cursor := y + firstItemGap - itemPitch/2
+		if g.Title == "" {
+			cursor = y - itemPitch/2 // an untitled group's items start where its header would be
+		}
+		sum := 0.0
 		for ii := range g.Items {
-			rows = append(rows, row{kind: rowItem, center: y, group: g, item: &g.Items[ii]})
-			y += itemPitch
+			wi := w(len(rows))
+			rows = append(rows, row{kind: rowItem, center: cursor + wi*itemPitch/2, group: g, item: &g.Items[ii]})
+			if wi > 0 {
+				bottom = math.Max(bottom, cursor+wi*itemPitch+marginBot)
+			}
+			cursor += wi * itemPitch
+			sum += wi
 		}
-		y += groupGap - itemPitch
+		// How far the next group starts: the same gaps as the plain layout
+		// at whole steps, blended in between.
+		some := math.Min(1, sum)
+		if g.Title != "" {
+			full := firstItemGap - itemPitch + groupGap
+			y += head * (emptyGroupGap + some*(full-emptyGroupGap) + sum*itemPitch)
+		} else {
+			y += some*(groupGap-itemPitch) + sum*itemPitch
+		}
 	}
-	if len(rows) == 0 {
-		return nil, 0
-	}
-	return rows, rows[len(rows)-1].center + itemPitch/2 + marginBot
+	return rows, bottom
 }
 
 // followOffset is the scroll offset, in points, that keeps the first active
@@ -214,10 +333,21 @@ func followOffset(l *List, viewH float64) (offset, maxOffset float64) {
 // pixels, scrolled down by offset points (clamped to the content).
 func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, widthPx, heightPx))
-	draw.Draw(img, img.Bounds(), image.NewUniform(r.pal.bg), image.Point{}, draw.Src)
+	if !r.clear {
+		draw.Draw(img, img.Bounds(), image.NewUniform(r.pal.bg), image.Point{}, draw.Src)
+	}
 
 	s := r.scale
 	rows, contentH := layout(l)
+	if r.icons != nil {
+		r.iconKeys = groupKeys(l)
+	}
+	geo := r.geo
+	if len(geo) != len(rows) {
+		geo = nil
+	} else {
+		contentH = r.geoH
+	}
 	if len(rows) == 0 {
 		r.text(img, "No tasks yet", marginLeft+textX, marginTop+baselineOffset, false, r.pal.doneText, 0)
 		return img
@@ -227,41 +357,83 @@ func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image
 
 	left := marginLeft
 	right := float64(widthPx)/s - marginRight
-	for _, rw := range rows {
-		cy := rw.center - offset
-		if cy < -itemPitch || cy > viewH+itemPitch {
+	for i, rw := range rows {
+		center, open := rw.center, 1.0
+		if geo != nil {
+			center, open = geo[i].center, geo[i].open
+		}
+		cy := center - offset
+		if open <= 0 || cy < -itemPitch || cy > viewH+itemPitch {
 			continue
 		}
-		switch rw.kind {
-		case rowHeader:
-			r.groupIcon(img, left+iconCenterX, cy, rw.group.progress())
-			r.text(img, rw.group.Title, left+titleX, cy+baselineOffset, true, r.pal.title, right-(left+titleX))
-			r.fillRect(img, left, cy+dividerOffset, right, cy+dividerOffset+1, r.pal.divider)
-		case rowItem:
-			r.item(img, rw.item, left, right, cy)
+		if open >= 1 {
+			r.row(img, i, rw, left, right, cy)
+			continue
 		}
+		// A row folding open or shut: draw it on its own layer, then show
+		// the middle of it, as tall as it is open, faded to match.
+		top, bot := cy-itemPitch/2, cy+itemPitch/2
+		if rw.kind == rowHeader {
+			top, bot = cy-14, cy+dividerOffset+2
+		}
+		band := image.Rect(0, int(math.Floor(top*s)), widthPx, int(math.Ceil(bot*s)))
+		if band.Intersect(img.Bounds()).Empty() {
+			continue
+		}
+		layer := image.NewRGBA(band)
+		r.row(layer, i, rw, left, right, cy)
+		mid, half := (top+bot)/2, (bot-top)/2*open
+		clip := image.Rect(0, int(math.Round((mid-half)*s)), widthPx, int(math.Round((mid+half)*s))).Intersect(img.Bounds())
+		fade := image.NewUniform(color.Alpha{uint8(math.Round(255 * open * open))})
+		draw.DrawMask(img, clip, layer, clip.Min, fade, image.Point{}, draw.Over)
+	}
+	if g := r.ring; g != nil && g.alpha > 0 {
+		r.outline(img, left, right, g.y-offset, g.grow, g.alpha)
+	}
+	if r.empty != "" && r.emptyAlpha > 0 {
+		col := premul(r.pal.doneText, r.emptyAlpha)
+		r.text(img, r.empty, marginLeft+textX, marginTop+baselineOffset-offset, false, col, 0)
 	}
 	return img
 }
 
-func (r *renderer) item(img *image.RGBA, it *Item, left, right, cy float64) {
-	bg := r.pal.bg
+// row draws one row of the list with its center line at cy.
+func (r *renderer) row(img *image.RGBA, i int, rw row, left, right, cy float64) {
+	switch rw.kind {
+	case rowHeader:
+		// A group with nothing done has no ring, and its title moves into
+		// the ring's place; the ring grows in as progress starts.
+		// It grows rightward from its left edge, pushing the title over, so
+		// the two never overlap.
+		show := r.iconShow(rw.group)
+		edge := left + iconCenterX - iconRadius
+		if show > 0 {
+			r.groupIcon(img, edge+iconRadius*show, cy, rw.group.progress(), show)
+		}
+		tx := edge + 0.25 + show*(left+titleX-edge-0.25)
+		r.textMarked(img, rw.group.Title, tx, cy+baselineOffset, true, r.pal.title, right-tx, r.marks[i])
+		r.fillRect(img, left, cy+dividerOffset, right, cy+dividerOffset+1, r.pal.divider)
+	case rowItem:
+		r.item(img, rw.item, left, right, cy, r.marks[i])
+	}
+}
+
+func (r *renderer) item(img *image.RGBA, it *Item, left, right, cy float64, marks []span) {
 	if it.Status == StatusActive {
-		bg = r.pal.activeBg
-		r.fillRoundRect(img, left-activeInset, cy-itemPitch/2+2, right+activeInset, cy+itemPitch/2-2, 6, bg)
+		r.fillRoundRect(img, left-activeInset, cy-itemPitch/2+2, right+activeInset, cy+itemPitch/2-2, 6, r.pal.activeBg)
 	}
 
 	bx, by := left+boxCenter-boxSize/2, cy-boxSize/2
+	box := roundRect(bx, by, bx+boxSize, by+boxSize, boxRadius)
+	hole := roundRect(bx+boxStroke, by+boxStroke, bx+boxSize-boxStroke, by+boxSize-boxStroke, boxRadius-boxStroke)
 	switch it.Status {
 	case StatusDone:
 		r.fillRoundRect(img, bx, by, bx+boxSize, by+boxSize, boxRadius, r.pal.accent)
 		r.checkmark(img, bx, by)
 	case StatusActive:
-		r.fillRoundRect(img, bx, by, bx+boxSize, by+boxSize, boxRadius, r.pal.accent)
-		r.fillRoundRect(img, bx+boxStroke, by+boxStroke, bx+boxSize-boxStroke, by+boxSize-boxStroke, boxRadius-boxStroke, bg)
+		r.fillRing(img, box, hole, r.pal.accent)
 	default:
-		r.fillRoundRect(img, bx, by, bx+boxSize, by+boxSize, boxRadius, r.pal.box)
-		r.fillRoundRect(img, bx+boxStroke, by+boxStroke, bx+boxSize-boxStroke, by+boxSize-boxStroke, boxRadius-boxStroke, bg)
+		r.fillRing(img, box, hole, r.pal.box)
 	}
 
 	col := r.pal.text
@@ -269,18 +441,13 @@ func (r *renderer) item(img *image.RGBA, it *Item, left, right, cy float64) {
 		col = r.pal.doneText
 	}
 	tx := left + textX
-	maxW := right - tx
-	if it.Note != "" {
-		maxW -= noteGap + noteW + noteTrail
+	show := r.spinShow(it)
+	// The working dots follow the text; a long item is cut short to fit them.
+	maxW := right - tx - show*(dotsGap+dotsW)
+	if show > 0 && r.dots {
+		r.workingDots(img, r.dotsX(it, right, show), cy, r.dotsPhase, show)
 	}
-	w, truncated := r.text(img, it.Text, tx, cy+baselineOffset, false, col, maxW)
-	if it.Note != "" {
-		nx := tx + w + noteGap
-		if truncated {
-			nx = tx + maxW + noteGap
-		}
-		r.noteIcon(img, nx, by+1/r.scale, bg) // one device pixel below the box top reads as centered
-	}
+	r.textMarked(img, it.Text, tx, cy+baselineOffset, false, col, maxW, marks)
 }
 
 // --- text ---------------------------------------------------------------
@@ -288,22 +455,35 @@ func (r *renderer) item(img *image.RGBA, it *Item, left, right, cy float64) {
 // text draws s with its baseline at (x, y) points, truncating with an
 // ellipsis to fit maxW when maxW > 0. It returns the drawn advance in points.
 func (r *renderer) text(img *image.RGBA, s string, x, y float64, bold bool, col color.RGBA, maxW float64) (float64, bool) {
-	s = strings.ReplaceAll(s, "\t", " ") // fonts have no tab glyph
+	return r.textMarked(img, s, x, y, bold, col, maxW, nil)
+}
+
+// textMarked is text with find matches highlighted behind it. marks are
+// byte ranges of s; a match cut off by the ellipsis highlights the ellipsis.
+// (The current match is marked by an outline around its row, not here.)
+func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool, col color.RGBA, maxW float64, marks []span) (float64, bool) {
 	face := r.fonts.face(bold, fontSize*r.scale)
 	track := tracking * fontSize * r.scale
-	truncated := false
-	if maxW > 0 && r.measure(face, s, track) > maxW*r.scale {
-		truncated = true
-		ell := "…"
-		for len(s) > 0 {
-			_, size := utf8.DecodeLastRuneInString(s)
-			s = s[:len(s)-size]
-			if r.measure(face, trimRight(s)+ell, track) <= maxW*r.scale {
-				break
-			}
+	s, kept, truncated := r.fit(s, bold, maxW)
+
+	// Highlights, mapped onto the drawn string, filled as one path so
+	// neighbors that touch don't darken where they overlap.
+	hl := r.path(img)
+	for _, m := range marks {
+		a, b := min(m.start, kept), min(m.end, kept)
+		if truncated && m.end > kept {
+			b = len(s) // runs into the ellipsis
 		}
-		s = trimRight(s) + ell
+		if a >= b {
+			continue
+		}
+		x0 := x + r.measure(face, s[:a], track)/r.scale - 1
+		x1 := x + r.measure(face, s[:b], track)/r.scale + 1
+		cy := y - baselineOffset
+		hl.poly(roundRect(x0, cy-9, x1, cy+9, 3))
 	}
+	hl.fill(r.tint(0.38))
+
 	src := image.NewUniform(col)
 	dot := fixed.Point26_6{X: fixed.Int26_6(x * r.scale * 64), Y: fixed.Int26_6(math.Round(y*r.scale) * 64)}
 	start := dot.X
@@ -320,6 +500,34 @@ func (r *renderer) text(img *image.RGBA, s string, x, y float64, bold bool, col 
 		prev = c
 	}
 	return float64(dot.X-start) / 64 / r.scale, truncated
+}
+
+// fit is s as drawn in maxW points (no limit when maxW <= 0): cut with an
+// ellipsis if it's too long. kept is how many bytes of s come before the
+// ellipsis.
+func (r *renderer) fit(s string, bold bool, maxW float64) (shown string, kept int, truncated bool) {
+	s = strings.ReplaceAll(s, "\t", " ") // fonts have no tab glyph
+	face := r.fonts.face(bold, fontSize*r.scale)
+	track := tracking * fontSize * r.scale
+	if maxW <= 0 || r.measure(face, s, track) <= maxW*r.scale {
+		return s, len(s), false
+	}
+	const ell = "…"
+	for len(s) > 0 {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+		if r.measure(face, trimRight(s)+ell, track) <= maxW*r.scale {
+			break
+		}
+	}
+	s = trimRight(s)
+	return s + ell, len(s), true
+}
+
+// textWidth is how wide fit's text is drawn, in points.
+func (r *renderer) textWidth(s string, bold bool, maxW float64) float64 {
+	shown, _, _ := r.fit(s, bold, maxW)
+	return r.measure(r.fonts.face(bold, fontSize*r.scale), shown, tracking*fontSize*r.scale) / r.scale
 }
 
 func (r *renderer) measure(face font.Face, s string, track float64) float64 {
@@ -371,7 +579,9 @@ func (p *pathBuilder) poly(pts [][2]float64) {
 	p.polys = append(p.polys, px)
 }
 
-func (p *pathBuilder) fill(col color.RGBA) {
+func (p *pathBuilder) fill(col color.RGBA) { p.fillWith(image.NewUniform(col)) }
+
+func (p *pathBuilder) fillWith(src image.Image) {
 	if len(p.polys) == 0 {
 		return
 	}
@@ -400,7 +610,7 @@ func (p *pathBuilder) fill(col color.RGBA) {
 		}
 		ras.ClosePath()
 	}
-	ras.Draw(p.img, box, image.NewUniform(col), image.Point{})
+	ras.Draw(p.img, box, src, image.Point{})
 }
 
 // arc appends points along a clockwise arc (screen coordinates) from a0 to a1 radians.
@@ -435,27 +645,81 @@ func (r *renderer) fillRect(img *image.RGBA, x0, y0, x1, y1 float64, col color.R
 	p.fill(col)
 }
 
+// outline rings the row centered at cy in the accent: the find match that
+// n / N are on. grow points it out past the row on every side, and alpha
+// fades it, for when it settles in.
+func (r *renderer) outline(img *image.RGBA, left, right, cy, grow, alpha float64) {
+	const w = 1.5
+	x0, y0 := left-activeInset-grow, cy-itemPitch/2+2-grow
+	x1, y1 := right+activeInset+grow, cy+itemPitch/2-2+grow
+	inner := roundRect(x0+w, y0+w, x1-w, y1-w, 6+grow-w)
+	for i, j := 0, len(inner)-1; i < j; i, j = i+1, j-1 {
+		inner[i], inner[j] = inner[j], inner[i] // the other way round makes a hole
+	}
+	p := r.path(img)
+	p.poly(roundRect(x0, y0, x1, y1, 6+grow))
+	p.poly(inner)
+	a := r.pal.accent
+	p.fillWith(image.NewUniform(color.NRGBA{a.R, a.G, a.B, uint8(math.Round(255 * math.Max(0, math.Min(1, alpha))))}))
+}
+
 func (r *renderer) fillCircle(img *image.RGBA, cx, cy, rad float64, col color.RGBA) {
 	p := r.path(img)
 	p.poly(arc(nil, cx, cy, rad, 0, 2*math.Pi))
 	p.fill(col)
 }
 
-// groupIcon draws the progress ring with a pie filled clockwise from 12 o'clock.
-func (r *renderer) groupIcon(img *image.RGBA, cx, cy, progress float64) {
-	r.fillCircle(img, cx, cy, iconRadius, r.pal.accent)
-	r.fillCircle(img, cx, cy, iconRadius-iconRingWidth, r.pal.bg)
+// groupIcon draws the progress ring with a pie filled clockwise from 12
+// o'clock. show (0 to 1) grows and fades it in.
+func (r *renderer) groupIcon(img *image.RGBA, cx, cy, progress, show float64) {
+	k := show // it grows from nothing
+	a := math.Min(1, show*1.5)
+	col := premul(r.pal.accent, a)
+	if !r.clear && a < 1 {
+		col = mix(r.pal.accent, r.pal.bg, 1-a)
+	}
+	r.fillRing(img, arc(nil, cx, cy, iconRadius*k, 0, 2*math.Pi), arc(nil, cx, cy, (iconRadius-iconRingWidth)*k, 0, 2*math.Pi), col)
 	switch {
 	case progress >= 0.999:
-		r.fillCircle(img, cx, cy, iconPieRadius, r.pal.accent)
+		r.fillCircle(img, cx, cy, iconPieRadius*k, col)
 	case progress > 0.001:
 		start := -math.Pi / 2
 		pts := [][2]float64{{cx, cy}}
-		pts = arc(pts, cx, cy, iconPieRadius, start, start+2*math.Pi*progress)
+		pts = arc(pts, cx, cy, iconPieRadius*k, start, start+2*math.Pi*progress)
 		p := r.path(img)
 		p.poly(pts)
-		p.fill(r.pal.accent)
+		p.fill(col)
 	}
+}
+
+// groupKeys names each group so a group's ring can be followed across
+// reloads: its title, and which of the groups with that title it is.
+func groupKeys(l *List) map[*Group]string {
+	keys := map[*Group]string{}
+	seen := map[string]int{}
+	for gi := range l.Groups {
+		g := &l.Groups[gi]
+		keys[g] = fmt.Sprint(g.Title, "\x00", seen[g.Title])
+		seen[g.Title]++
+	}
+	return keys
+}
+
+// iconShow is how far g's ring is in: from r.icons while it animates,
+// else 1 once anything in the group is under way and 0 before.
+func (r *renderer) iconShow(g *Group) float64 {
+	if r.icons != nil {
+		if r.iconKeys == nil {
+			r.iconKeys = map[*Group]string{}
+		}
+		if v, ok := r.icons[r.iconKeys[g]]; ok && r.iconKeys[g] != "" {
+			return v
+		}
+	}
+	if g.progress() > 0 {
+		return 1
+	}
+	return 0
 }
 
 func (r *renderer) checkmark(img *image.RGBA, bx, by float64) {
@@ -475,33 +739,4 @@ func (r *renderer) checkmark(img *image.RGBA, bx, by float64) {
 		})
 	}
 	p.fill(r.pal.check)
-}
-
-// noteIcon draws the dog-eared page shown after items that have notes.
-func (r *renderer) noteIcon(img *image.RGBA, x, y float64, bg color.RGBA) {
-	x1, y1 := x+noteW, y+noteH
-	c := noteCorner
-	outer := [][2]float64{{x + noteW - noteFold, y}, {x1, y + noteFold}}
-	outer = arc(outer, x1-c, y1-c, c, 0, math.Pi/2)
-	outer = arc(outer, x+c, y1-c, c, math.Pi/2, math.Pi)
-	outer = arc(outer, x+c, y+c, c, math.Pi, 3*math.Pi/2)
-	p := r.path(img)
-	p.poly(outer)
-	p.fill(r.pal.note)
-
-	st, ic := noteStroke, 0.5
-	d := math.Sqrt2 * st
-	inner := [][2]float64{{x + noteW - noteFold + st - d, y + st}, {x1 - st, y + noteFold - st + d}}
-	inner = arc(inner, x1-st-ic, y1-st-ic, ic, 0, math.Pi/2)
-	inner = arc(inner, x+st+ic, y1-st-ic, ic, math.Pi/2, math.Pi)
-	inner = arc(inner, x+st+ic, y+st+ic, ic, math.Pi, 3*math.Pi/2)
-	p = r.path(img)
-	p.poly(inner)
-	p.fill(bg)
-
-	// The fold: an L from the top edge down and across to the right edge.
-	fx := x + noteW - noteFold - st/2
-	fy := y + noteFold + st/2
-	r.fillRect(img, fx-st/2, y, fx+st/2, fy+st/2, r.pal.note)
-	r.fillRect(img, fx-st/2, fy-st/2, x1, fy+st/2, r.pal.note)
 }
