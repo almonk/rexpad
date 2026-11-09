@@ -1187,7 +1187,7 @@ func runView(name string, opt viewOptions) error {
 		}
 		var err error
 		if hit.item != nil {
-			err = toggleByUser(path, on.item, hit.item.Status)
+			err = toggleByUser(path, hit.item.ID, hit.item.Status)
 		} else {
 			err = toggleCollapsedByUser(path, on.group, hit.group.Collapsed)
 		}

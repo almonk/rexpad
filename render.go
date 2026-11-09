@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
@@ -419,15 +418,13 @@ func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image
 
 	s := r.scale
 	r.wrapList(l, float64(widthPx)/s-marginRight)
-	rows, contentH := layout(l)
+	rows := drawnRows(l, r.geo)
+	_, contentH := layout(l)
+	if len(r.geo) == len(rows) {
+		contentH = r.geoH
+	}
 	if r.icons != nil {
 		r.iconKeys = groupKeys(l)
-	}
-	geo := r.geo
-	if len(geo) != len(rows) {
-		geo = nil
-	} else {
-		contentH = r.geoH
 	}
 	if len(rows) == 0 {
 		r.text(img, "No tasks yet", marginLeft+textX, marginTop+baselineOffset, false, r.pal.doneText, 0)
@@ -439,11 +436,8 @@ func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image
 	left := marginLeft
 	right := float64(widthPx)/s - marginRight
 	for i, rw := range rows {
-		center, open := rw.center, rw.open
-		if geo != nil {
-			center, open = geo[i].center, geo[i].open
-		}
-		cy := center - offset
+		open := rw.open
+		cy := rw.center - offset
 		if open <= 0 || cy < -itemPitch-rw.extra || cy > viewH+itemPitch {
 			continue
 		}
@@ -492,6 +486,7 @@ func (r *renderer) row(img *image.RGBA, i int, rw row, left, right, cy float64) 
 			r.groupIcon(img, edge+iconRadius*show, cy, rw.group.progress(), show)
 		}
 		tx := edge + 0.25 + show*(left+titleX-edge-0.25)
+		// At least 1: fit draws a width of 0 or less in full, into the arrow.
 		r.textMarked(img, rw.group.Title, tx, cy+baselineOffset, true, r.pal.title, max(1, right-arrowRoom-tx), r.marks[i])
 		r.disclosure(img, right-arrowInset, cy, rw.group.Collapsed)
 		r.fillRect(img, left, cy+dividerOffset, right, cy+dividerOffset+1, r.pal.divider)
@@ -782,19 +777,6 @@ func (r *renderer) groupIcon(img *image.RGBA, cx, cy, progress, show float64) {
 		p.poly(pts)
 		p.fill(col)
 	}
-}
-
-// groupKeys names each group so a group's ring can be followed across
-// reloads: its title, and which of the groups with that title it is.
-func groupKeys(l *List) map[*Group]string {
-	keys := map[*Group]string{}
-	seen := map[string]int{}
-	for gi := range l.Groups {
-		g := &l.Groups[gi]
-		keys[g] = fmt.Sprint(g.Title, "\x00", seen[g.Title])
-		seen[g.Title]++
-	}
-	return keys
 }
 
 // iconShow is how far g's ring is in: from r.icons while it animates,

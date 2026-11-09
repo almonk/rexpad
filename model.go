@@ -305,6 +305,19 @@ func (l *List) remove(id int) bool {
 	return false
 }
 
+// groupKeys names each group so a group can be followed across reloads
+// and rewrites of the list: its title, and which of the groups with that title it is.
+func groupKeys(l *List) map[*Group]string {
+	keys := map[*Group]string{}
+	seen := map[string]int{}
+	for gi := range l.Groups {
+		g := &l.Groups[gi]
+		keys[g] = fmt.Sprint(g.Title, "\x00", seen[g.Title])
+		seen[g.Title]++
+	}
+	return keys
+}
+
 // groupByKey is the group that groupKeys names key, or nil.
 func (l *List) groupByKey(key string) *Group {
 	for g, k := range groupKeys(l) {
