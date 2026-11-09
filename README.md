@@ -170,9 +170,12 @@ open, and the ring still shows the group's progress while it is collapsed.
 
 rexpad stores the state as `"collapsed": true` on the group in the list's
 JSON, so it stays after the viewer restarts. `rexpad get --json` shows it,
-and `rexpad get` does not. Commands from the agent never expand a group,
-and `set` keeps the state of each group whose title stays the same. If the
-active item is in a collapsed group, the viewer follows the group's header.
+and `rexpad get` does not. An agent can change it with `rexpad collapse
+GROUP` and `rexpad expand GROUP`, where GROUP is a title prefix or a
+number, as for `add -g`. An agent expands a group that you collapsed only
+when you ask. Other commands keep the state, and `set` keeps the state of
+each group whose title stays the same. If the active item is in a
+collapsed group, the viewer follows the group's header.
 
 While find filters the list, the matching items show even in a collapsed
 group. A click on a header then only turns its arrow. The items fold when
@@ -239,6 +242,7 @@ Changing items
   undo ID...                     mark pending again
   edit ID TEXT / rm ID...
   progress GROUP PCT|auto        pin a group's ring, or go back to counting items
+  collapse GROUP / expand GROUP  hide a group's items, or show them again
 
 Waiting for the user
   wait [ID...]                   wait until the user clicks one of the items (no ID: any item), then print them

@@ -118,4 +118,6 @@ when you start unrelated work (then `set` the new plan instead).
 - If the user wants a pane that ignores clicks, run `rexpad hide`, then
   `rexpad show --no-click`. `show` does nothing while the pane is open.
 - The user can collapse a group with a click on its header (`"collapsed": true`
-  in `rexpad get --json`). Do not expand a group that the user collapsed.
+  in `rexpad get --json`). `rexpad collapse GROUP` and `rexpad expand GROUP`
+  do the same, with GROUP as for `add -g`. Do not expand a group that the
+  user collapsed, unless the user asks.

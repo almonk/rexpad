@@ -93,8 +93,9 @@ type Group struct {
 	Title string `json:"title"`
 	// Progress overrides the ring's fill (0 to 1). Unset, it's the share of done items.
 	Progress *float64 `json:"progress,omitempty"`
-	// Collapsed is set when the user clicked the group's header in the
-	// viewer to hide its items. Only the user changes it.
+	// Collapsed hides the group's items. The user changes it with a click
+	// on the group's header in the viewer, and an agent with collapse or
+	// expand.
 	Collapsed bool   `json:"collapsed,omitempty"`
 	Items     []Item `json:"items"`
 }

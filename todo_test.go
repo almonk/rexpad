@@ -2216,6 +2216,38 @@ func TestCommandsKeepGroupsCollapsed(t *testing.T) {
 	}
 }
 
+func TestCollapseAndExpandCommands(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "collapsecmd")
+	path := listPath("collapsecmd")
+	saveMarkdown(t, path, "# Build\n- [ ] a {#1}\n# Ship\n- [ ] b {#2}\n")
+	collapsed := func() []bool {
+		l := mustLoad(t, path)
+		return []bool{l.Groups[0].Collapsed, l.Groups[1].Collapsed}
+	}
+
+	mustRun(t, "collapse", "bu") // by title prefix
+	mustRun(t, "collapse", "2")  // by index
+	if got := collapsed(); !slices.Equal(got, []bool{true, true}) {
+		t.Errorf("after collapse: %v, want both collapsed", got)
+	}
+	mustRun(t, "expand", "Ship")
+	if got := collapsed(); !slices.Equal(got, []bool{true, false}) {
+		t.Errorf("after expand Ship: %v, want only Build collapsed", got)
+	}
+	mustRun(t, "expand", "1")
+	if got := collapsed(); !slices.Equal(got, []bool{false, false}) {
+		t.Errorf("after expand 1: %v, want none collapsed", got)
+	}
+
+	if err := run([]string{"collapse", "Nope"}); err == nil {
+		t.Error("collapse on a missing group should fail")
+	}
+	if err := run([]string{"expand"}); err == nil {
+		t.Error("expand with no group should fail")
+	}
+}
+
 // collapsedList parses md and collapses the groups at the given indices.
 func collapsedList(t *testing.T, md string, groups ...int) *List {
 	t.Helper()

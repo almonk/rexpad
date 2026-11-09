@@ -43,12 +43,14 @@ Changing items
   edit ID TEXT                  change an item's text
   rm ID...                      delete items
   progress GROUP PCT|auto       pin a group's ring fill (0-100), or go back to counting items
+  collapse GROUP                hide a group's items in the viewer
+  expand GROUP                  show a group's items again
 
 Waiting for the user
   In the viewer, the user clicks an item's box to mark it done, or open again.
   The item then has "by": "user" (see get --json) until a command changes it.
   A click on a group's header collapses or expands the group ("collapsed": true
-  in get --json). Commands do not expand it, and set keeps it by title.
+  in get --json). Of the commands, only expand opens it again, and set keeps it by title.
   --no-click on show or view turns clicks off.
   wait [ID...]                  wait until one of the items (no ID: any item) has the
                                 user's mark, then print those items. A mark from before
@@ -476,6 +478,19 @@ func run(args []string) error {
 					return fmt.Errorf("no item %d", n)
 				}
 			}
+			return nil
+		})
+
+	case "collapse", "expand":
+		if len(args) != 1 {
+			return fmt.Errorf("%s needs GROUP", cmd)
+		}
+		return mutate(func(l *List) error {
+			g := l.group(args[0])
+			if g == nil {
+				return fmt.Errorf("no group %q", args[0])
+			}
+			g.Collapsed = cmd == "collapse"
 			return nil
 		})
 
