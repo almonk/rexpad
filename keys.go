@@ -92,7 +92,8 @@ type sgrMouse struct {
 // parseSGRMouse reads an SGR mouse report, without the ESC [: < btn ; x ; y
 // then M for a press or m for a release.
 func parseSGRMouse(seq string) (sgrMouse, bool) {
-	if !strings.HasPrefix(seq, "<") || !(strings.HasSuffix(seq, "M") || strings.HasSuffix(seq, "m")) {
+	release := strings.HasSuffix(seq, "m")
+	if !strings.HasPrefix(seq, "<") || !(release || strings.HasSuffix(seq, "M")) {
 		return sgrMouse{}, false
 	}
 	fields := strings.Split(seq[1:len(seq)-1], ";")
@@ -107,7 +108,7 @@ func parseSGRMouse(seq string) (sgrMouse, bool) {
 		}
 		n[i] = v
 	}
-	return sgrMouse{btn: n[0], x: n[1], y: n[2], release: strings.HasSuffix(seq, "m")}, true
+	return sgrMouse{btn: n[0], x: n[1], y: n[2], release: release}, true
 }
 
 // csiScroll maps an SGR mouse report (without the ESC [) to a wheel tick.
