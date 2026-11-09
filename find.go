@@ -35,7 +35,7 @@ type findState struct {
 	input   bool      // typing into it
 	edit    textField // the bar's text field
 	query   string    // what the list is filtered by: the field's text
-	vis     []bool    // which of layout's rows show; nil shows them all
+	vis     []bool    // which of layout's rows show; nil shows all but collapsed groups' items
 	matches []rowMatch
 	cur     int // index into matches
 }
@@ -327,7 +327,7 @@ func easeRingBy(g, to ringGeo, dt time.Duration, scale float64, tau time.Duratio
 }
 
 // arrivalGeo is where nl's rows start after the list changed from old,
-// whose rows were at oldGeo (nil: at rest, all open): a row that was there
+// whose rows were at oldGeo (nil: at rest): a row that was there
 // keeps how open it was, and a new one starts folded shut, so it unfolds
 // into place. Items are the same by ID, or else by group and text, so
 // rewriting a plan with set doesn't replay it; groups are the same by title.
