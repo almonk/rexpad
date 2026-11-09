@@ -1047,18 +1047,20 @@ func runView(name string, opt viewOptions) error {
 	}
 	// closeFind folds the whole list back open and keeps the match that was
 	// current in view, so Esc lands you on what you found, in context. A
-	// match in a collapsed group would fold away, so its group expands.
+	// match in a collapsed group would fold away, so its group expands,
+	// unless the pane is read-only.
 	closeFind := func() {
 		m, ok := find.current()
-		if id := find.foldedMatch(list); id != 0 {
-			if err := expandGroupOf(path, id); err != nil {
+		if !opt.noClick {
+			if err := find.expandFoldedMatch(path, list); err != nil {
 				fmt.Fprint(w, "\a") // the view lands on the group's header instead
 			}
 		}
 		find = findState{}
 		refold()
-		draw(true) // the bar's rows go back to the list first, and the expanded group loads
-		if ok {
+		draw(true) // the bar's rows go back to the list first
+		// The reload can drop rows that an agent removed meanwhile.
+		if ok && m.row < len(geoTo) {
 			scrollTo(math.Max(0, math.Min(geoTo[m.row].center-viewH/3, geoToH-viewH)))
 		} else {
 			scrollTo(findFrom)

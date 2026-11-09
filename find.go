@@ -244,6 +244,21 @@ func (f *findState) foldedMatch(l *List) int {
 	return m.itemID
 }
 
+// expandFoldedMatch expands the collapsed group that holds the current
+// match, in the stored list at path and in l, so that the match stays in
+// view once find closes.
+func (f *findState) expandFoldedMatch(path string, l *List) error {
+	id := f.foldedMatch(l)
+	if id == 0 {
+		return nil
+	}
+	if err := expandGroupOf(path, id); err != nil {
+		return err
+	}
+	l.groupOf(id).Collapsed = false
+	return nil
+}
+
 // spans groups the matches by row for the renderer.
 func (f *findState) spans() map[int][]span {
 	if f == nil || len(f.matches) == 0 {

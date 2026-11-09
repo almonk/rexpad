@@ -181,7 +181,8 @@ While find filters the list, the matching items show even in a collapsed
 group. A click on a header then only turns its arrow. The items fold when
 you close find or clear the query. If you close find while the match you
 are on is an item in a collapsed group, the group expands, so the item
-stays in view.
+stays in view. A pane with `--no-click` never changes the list, so there
+the view goes to the group's header.
 
 ## Using it with an agent
 

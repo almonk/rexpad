@@ -2296,6 +2296,44 @@ func TestFoldedMatchIsAnItemInACollapsedGroup(t *testing.T) {
 	}
 }
 
+func TestExpandFoldedMatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "l.json")
+	saveMarkdown(t, path, "# Build\n- [ ] alpha {#1}\n# Ship\n- [ ] beta {#2}\n")
+	for _, i := range []int{0, 1} {
+		if err := toggleCollapsedByUser(path, keyOf(mustLoad(t, path), i), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l := mustLoad(t, path)
+	var f findState
+	f.setQuery(l, "alpha")
+	if err := f.expandFoldedMatch(path, l); err != nil {
+		t.Fatal(err)
+	}
+	stored := mustLoad(t, path)
+	for _, c := range []struct {
+		name string
+		l    *List
+	}{{"stored", stored}, {"in memory", l}} {
+		if c.l.Groups[0].Collapsed || !c.l.Groups[1].Collapsed {
+			t.Errorf("%s: collapsed = %v, %v; want only Ship", c.name, c.l.Groups[0].Collapsed, c.l.Groups[1].Collapsed)
+		}
+	}
+
+	// A match on a header leaves the list as it is, without a write.
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.setQuery(l, "ship")
+	if err := f.expandFoldedMatch(path, l); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) || !l.Groups[1].Collapsed {
+		t.Error("a header match expanded its group")
+	}
+}
+
 func TestExpandGroupOf(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "l.json")
 	saveMarkdown(t, path, "# A\n- [~] a {#1}\n# B\n- [ ] b {#2}\n")
