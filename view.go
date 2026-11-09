@@ -1137,11 +1137,11 @@ func runView(name string, opt viewOptions) error {
 			pressed = id
 			return
 		}
-		if id == 0 || id != pressed {
-			pressed = 0
+		downOn := pressed
+		pressed = 0
+		if id == 0 || id != downOn {
 			return
 		}
-		pressed = 0
 		if err := toggleByUser(path, id, it.Status); err != nil {
 			// The pane has no room for a message: the bell says the
 			// click didn't take, and the box shows it unchanged.
