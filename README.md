@@ -199,12 +199,14 @@ Agent skill
 | `--theme` | `terminal` | `terminal` follows the Rex theme; `light` and `dark` use fixed palettes. |
 | `--ratio PCT` | `30` | The pane's share of the split. |
 | `--scale N` (`view`, `render`), `$REXPAD_SCALE` | from the cell size | Device pixels per point. |
-| `$REXPAD_FONT`, `$REXPAD_FONT_BOLD` | SF Pro Text | Paths to other font files. |
+| `$REXPAD_FONT`, `$REXPAD_FONT_BOLD` | SF Pro Text | Paths to other font files. SF Pro's tracking is not applied to them. |
+| `$REXPAD_FONT_SIZE` | `14` | Text size in points. Use the terminal's size to match its text, such as `12`. Row spacing does not change. |
+| `$REXPAD_TEXT_GAMMA` | `1` | Above 1 thickens the edges of letters, close to macOS's "Improve text contrast". Try `1.4` on a 1x display. |
 | `$XDG_STATE_HOME` | `~/.local/state` | Lists are stored in `rexpad/` under it. |
 
 Rex starts the viewer pane in its own environment, not in your shell's. So
-`show` passes `$REXPAD_FONT`, `$REXPAD_FONT_BOLD`, `$REXPAD_SCALE`, and
-`$XDG_STATE_HOME` from the shell that runs it to the viewer. Set them where
+`show` passes the `$REXPAD_*` settings and `$XDG_STATE_HOME` from the shell
+that runs it to the viewer. Set them where
 your agent's shell reads them, such as `~/.zshrc`. An open viewer keeps the
 values it started with, so run `hide` and then `show` to apply a change.
 
@@ -224,6 +226,12 @@ values it started with, so run `hide` and then `show` to apply a change.
   eases; where the rows sit follows from that, so folding neighbors never
   overlap. Mid-fold, every frame is a new image the size of the view, about
   60 a second. Once the rows settle, the viewer goes back to one tall sheet.
+- **Text**: each string is shaped with
+  [go-text/typesetting](https://github.com/go-text/typesetting), so the font's
+  kerning, ligatures, and contextual alternates (such as Monaspace's texture
+  healing) apply. Below 2x every letter starts on a whole pixel, so the same
+  letter looks the same everywhere instead of blurring differently in each
+  spot.
 - **Theme**: the viewer asks the terminal for its foreground, background, and
   blue (OSC 10, 11, and 4), and mixes the grays from those in the same
   proportions as the light design. It asks again every 2 seconds and whenever
