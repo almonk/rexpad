@@ -2229,7 +2229,8 @@ func TestLayoutFoldsCollapsedGroups(t *testing.T) {
 			rows[3].center, rows[4].center, h, erows[1].center, erows[2].center, eh)
 	}
 	open, _ := parseMarkdown(md)
-	for i, rw := range func() []row { r, _ := layout(open); return r }() {
+	openRows, _ := layout(open)
+	for i, rw := range openRows {
 		if rw.open != 1 {
 			t.Errorf("open list: row %d open %v, want 1", i, rw.open)
 		}
