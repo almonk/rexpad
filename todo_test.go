@@ -1880,3 +1880,55 @@ func TestDecodeClicks(t *testing.T) {
 		t.Errorf("clicks = %+v, want %+v", got, want)
 	}
 }
+
+func TestHitItem(t *testing.T) {
+	l, _ := parseMarkdown("# G\n- [ ] a {#1}\n- [ ] b {#2}\n# H\n- [ ] c {#3}\n")
+	l.find(2).lines = []int{0, 1} // b wraps to two lines
+	rows, _ := layout(l)
+	center := map[int]float64{}
+	for _, rw := range rows {
+		if rw.kind == rowItem {
+			center[rw.item.ID] = rw.center
+		}
+	}
+	boxX := marginLeft + boxCenter
+	id := func(it *Item) int {
+		if it == nil {
+			return 0
+		}
+		return it.ID
+	}
+	cases := []struct {
+		name string
+		x, y float64
+		want int
+	}{
+		{"on a box", boxX, center[1], 1},
+		{"at the pane's left edge", 0, center[3], 3},
+		{"near the top of the row", boxX, center[1] - itemPitch/2 + 1, 1},
+		{"in a wrapped item's second line", boxX, center[2] + lineH, 2},
+		{"on the text", marginLeft + textX + 4, center[1], 0},
+		{"on a group title", boxX, rows[0].center, 0},
+		{"between a title and its first item", boxX, rows[0].center + 16, 0},
+		{"below the list", boxX, center[3] + itemPitch, 0},
+	}
+	for _, c := range cases {
+		if got := id(hitItem(l, nil, c.x, c.y)); got != c.want {
+			t.Errorf("%s: hit %d, want %d", c.name, got, c.want)
+		}
+	}
+
+	// While find folds rows away, a click hits the row drawn there, and
+	// never one still folding.
+	geo, _ := geoFor(l, []bool{true, false, true, true, true})
+	if got := id(hitItem(l, geo, boxX, geo[2].center)); got != 2 {
+		t.Errorf("folded: hit %d where item 2 is drawn, want 2", got)
+	}
+	if got := id(hitItem(l, geo, boxX, center[1])); got == 1 {
+		t.Error("folded: hit item 1, which is folded away")
+	}
+	geo[4].open = 0.5
+	if got := id(hitItem(l, geo, boxX, geo[4].center)); got != 0 {
+		t.Errorf("hit item %d while it was still folding", got)
+	}
+}
