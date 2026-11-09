@@ -157,7 +157,8 @@ exits at once, so a click never gets lost. An agent runs `wait` as a
 background command and continues when it exits. `set` replaces every item
 and drops the marks, so an agent does not use `set` while a `wait` runs.
 
-To open a pane that ignores clicks, run `rexpad show --no-click`.
+To open a pane that ignores clicks, run `rexpad show --no-click`. Its
+group headers have no arrow.
 
 ### Collapsing groups
 

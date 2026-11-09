@@ -173,6 +173,9 @@ type renderer struct {
 	spins     map[int]float64
 	dots      bool
 	dotsPhase float64
+	// noClick leaves out the headers' arrows, since a header that cannot
+	// be clicked has no use for one, and gives titles their room.
+	noClick bool
 	// icons, by groupKeys, is how far each group's ring is in while it
 	// animates; iconKeys is groupKeys of the list being drawn.
 	icons    map[string]float64
@@ -486,9 +489,13 @@ func (r *renderer) row(img *image.RGBA, i int, rw row, left, right, cy float64) 
 			r.groupIcon(img, edge+iconRadius*show, cy, rw.group.progress(), show)
 		}
 		tx := edge + 0.25 + show*(left+titleX-edge-0.25)
-		// At least 1: fit draws a width of 0 or less in full, into the arrow.
-		r.textMarked(img, rw.group.Title, tx, cy+baselineOffset, true, r.pal.title, max(1, right-arrowRoom-tx), r.marks[i])
-		r.disclosure(img, right-arrowInset, cy, rw.group.Collapsed)
+		titleRight := right
+		if !r.noClick {
+			titleRight -= arrowRoom
+			r.disclosure(img, right-arrowInset, cy, rw.group.Collapsed)
+		}
+		// At least 1: fit draws a width of 0 or less in full, past the edge.
+		r.textMarked(img, rw.group.Title, tx, cy+baselineOffset, true, r.pal.title, max(1, titleRight-tx), r.marks[i])
 		r.fillRect(img, left, cy+dividerOffset, right, cy+dividerOffset+1, r.pal.divider)
 	case rowItem:
 		r.item(img, rw.item, left, right, cy, r.marks[i])

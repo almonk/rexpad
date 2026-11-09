@@ -667,7 +667,7 @@ func runView(name string, opt viewOptions) error {
 
 		newRenderer := func() *renderer {
 			r := &renderer{fonts: fonts, scale: scale, pal: drawPal(), marks: find.spans(), geo: geo, geoH: contentH, clear: clear, icons: maps.Clone(icons),
-				spins: maps.Clone(spins), dots: moving, dotsPhase: time.Since(dotsEpoch).Seconds()}
+				spins: maps.Clone(spins), dots: moving, dotsPhase: time.Since(dotsEpoch).Seconds(), noClick: opt.noClick}
 			if ring.alpha > 0 {
 				g := ring
 				r.ring = &g

@@ -2499,6 +2499,40 @@ func TestHeaderArrowShowsState(t *testing.T) {
 	}
 }
 
+func TestNoClickHeaderHasNoArrowAndAFullWidthTitle(t *testing.T) {
+	fonts, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const scale, widthPt = 2.0, 300.0
+	right := widthPt - marginRight
+	inkIn := func(img *image.RGBA, x0, x1, cy float64) bool {
+		for x := x0 * scale; x < x1*scale; x++ {
+			for y := (cy - 9) * scale; y < (cy+9)*scale; y++ {
+				if img.RGBAAt(int(x), int(y)) != lightPalette.bg {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	render := func(l *List) *image.RGBA {
+		return (&renderer{fonts: fonts, scale: scale, pal: lightPalette, noClick: true}).Render(l, int(widthPt*scale), 200, 0)
+	}
+
+	short := collapsedList(t, "# A\n- [ ] a {#1}\n")
+	rows, _ := layout(short)
+	if inkIn(render(short), right-arrowRoom, right, rows[0].center) {
+		t.Error("a header that cannot be clicked has an arrow")
+	}
+
+	long, _ := parseMarkdown("# " + strings.Repeat("Wide title ", 40) + "\n- [ ] a\n")
+	rows, _ = layout(long)
+	if !inkIn(render(long), right-arrowRoom+2, right, rows[0].center) {
+		t.Error("a long title stops short of the room the arrow would take")
+	}
+}
+
 func TestLongTitleLeavesRoomForTheArrow(t *testing.T) {
 	fonts, err := loadFonts()
 	if err != nil {
