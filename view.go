@@ -805,19 +805,11 @@ func runView(name string, opt viewOptions) error {
 			measure := &renderer{fonts: fonts, scale: scale, pal: pal}
 			right := float64(widthPx)/scale - marginRight
 			if !moving {
-				rws, _ := layout(list)
-				for i, rw := range rws {
-					if rw.kind != rowItem || spins[rw.item.ID] < 1 || rw.item.Status != StatusActive {
+				for _, rw := range drawnRows(list, geo) {
+					if rw.kind != rowItem || rw.open < 1 || spins[rw.item.ID] < 1 || rw.item.Status != StatusActive {
 						continue
 					}
-					c, open := rw.center, rw.open
-					if geo != nil && len(geo) == len(rws) {
-						c, open = geo[i].center, geo[i].open
-					}
-					if open < 1 {
-						continue
-					}
-					want = append(want, struct{ center, x float64 }{c + rw.extra, measure.dotsX(rw.item, right, 1)})
+					want = append(want, struct{ center, x float64 }{rw.center + rw.extra, measure.dotsX(rw.item, right, 1)})
 				}
 			}
 			fadePx := 0
