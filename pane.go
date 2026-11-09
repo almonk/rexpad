@@ -103,23 +103,13 @@ func showPane(name string, opt showOptions) error {
 	return nil
 }
 
-// viewArgs is the viewer's command line. A click in the viewer moves focus
-// into its pane, so the viewer gets the agent's pane to give focus back to.
+// viewArgs is the viewer's command line.
 func viewArgs(self, name string, opt showOptions) []string {
 	args := []string{self, "view", "--list", name, "--theme", opt.theme}
-	if b := os.Getenv("REX_BLOCK"); b != "" {
-		args = append(args, "--return-focus", b)
-	}
 	if opt.noClick {
 		args = append(args, "--no-click")
 	}
 	return args
-}
-
-// returnFocus gives focus to the Rex pane block. If it fails, focus stays
-// in the viewer, where the click put it, so there is nothing to undo.
-func returnFocus(block string) {
-	_ = exec.Command("rex", "block", "focus", block).Run()
 }
 
 func hidePane(name string) error {

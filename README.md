@@ -136,8 +136,7 @@ Some steps need you, for example a login or an approval in a browser. To
 mark an item done, click its checkbox in the pane. To open a done item
 again, click its box again. A click anywhere else does nothing, so you can
 click into the pane to scroll or find without a change to the list. After a
-click on a box, focus goes back to the agent's pane, so your typing still
-goes to the agent. While find is open, focus stays in the pane.
+click, focus stays in the pane. To type to the agent again, click its pane.
 
 rexpad marks each item that you click with `"by": "user"` in the list's
 JSON. `rexpad get --json` shows the mark, and `rexpad get` does not. Any
@@ -269,8 +268,6 @@ values it started with, so run `hide` and then `show` to apply a change.
   (modes 1000, 1006, and 1016), and maps each click to a row of the frame
   on screen. Clicks work only after the terminal confirms mode 1016 (a
   DECRQM reply), because cell positions would land on the wrong rows. A press and a release on the same checkbox toggle the item.
-  Then the viewer runs `rex block focus` on the agent's pane, which `show`
-  gives it.
 - **Find**: rows fold away like an accordion. Only how open each row is
   eases; where the rows sit follows from that, so folding neighbors never
   overlap. Mid-fold, every frame is a new image the size of the view, about

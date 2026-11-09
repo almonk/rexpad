@@ -173,12 +173,11 @@ func run(args []string) error {
 		fs := flag.NewFlagSet("view", flag.ContinueOnError)
 		theme := fs.String("theme", "terminal", "terminal (follow the Rex theme), light, or dark")
 		scale := fs.Float64("scale", 0, "device pixels per point (0: from the cell size)")
-		focus := fs.String("return-focus", "", "Rex pane to give focus to after a click")
 		noClick := fs.Bool("no-click", false, "clicks do not toggle items")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
-		return runView(name, viewOptions{theme: *theme, scale: *scale, returnFocus: *focus, noClick: *noClick})
+		return runView(name, viewOptions{theme: *theme, scale: *scale, noClick: *noClick})
 
 	case "render":
 		fs := flag.NewFlagSet("render", flag.ContinueOnError)

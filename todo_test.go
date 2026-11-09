@@ -1957,13 +1957,14 @@ func TestClickedItemUsesTheFrameOnScreen(t *testing.T) {
 }
 
 func TestViewArgs(t *testing.T) {
+	// A click keeps focus in the viewer's pane, so the agent's pane is not
+	// passed to the viewer.
 	t.Setenv("REX_BLOCK", "block:agent")
 	got := viewArgs("/bin/rexpad", "mylist", showOptions{theme: "dark"})
-	want := []string{"/bin/rexpad", "view", "--list", "mylist", "--theme", "dark", "--return-focus", "block:agent"}
+	want := []string{"/bin/rexpad", "view", "--list", "mylist", "--theme", "dark"}
 	if !slices.Equal(got, want) {
 		t.Errorf("viewArgs = %q, want %q", got, want)
 	}
-	t.Setenv("REX_BLOCK", "")
 	got = viewArgs("/bin/rexpad", "mylist", showOptions{theme: "dark", noClick: true})
 	want = []string{"/bin/rexpad", "view", "--list", "mylist", "--theme", "dark", "--no-click"}
 	if !slices.Equal(got, want) {

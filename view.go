@@ -21,10 +21,9 @@ import (
 )
 
 type viewOptions struct {
-	theme       string  // terminal (follow the terminal's colors), light, or dark
-	scale       float64 // device pixels per point; 0 picks from the cell size
-	returnFocus string  // the Rex pane to give focus to after a click, if any
-	noClick     bool    // clicks do not toggle items
+	theme   string  // terminal (follow the terminal's colors), light, or dark
+	scale   float64 // device pixels per point; 0 picks from the cell size
+	noClick bool    // clicks do not toggle items
 }
 
 // clickedItem is the item whose box a click at pixel c is on, in the frame
@@ -1148,8 +1147,7 @@ func runView(name string, opt viewOptions) error {
 	}
 
 	// handleClick toggles an item when the button goes down and comes up on
-	// its box. The click moved focus into this pane; unless find is in use
-	// here, focus goes back to the agent's pane.
+	// its box. Focus stays in this pane.
 	//
 	// Clicks work only once the terminal confirms that it reports pixels
 	// (mode 1016): a terminal that reports cells instead would put every
@@ -1174,9 +1172,6 @@ func runView(name string, opt viewOptions) error {
 			fmt.Fprint(w, "\a")
 		}
 		draw(false)
-		if opt.returnFocus != "" && !find.open {
-			go returnFocus(opt.returnFocus)
-		}
 	}
 
 	draw(true)
