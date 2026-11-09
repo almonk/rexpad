@@ -205,7 +205,8 @@ Agent skill
 Rex starts the viewer pane in its own environment, not in your shell's. So
 `show` passes `$REXPAD_FONT`, `$REXPAD_FONT_BOLD`, `$REXPAD_SCALE`, and
 `$XDG_STATE_HOME` from the shell that runs it to the viewer. Set them where
-your agent's shell reads them, such as `~/.zshrc`.
+your agent's shell reads them, such as `~/.zshrc`. An open viewer keeps the
+values it started with, so run `hide` and then `show` to apply a change.
 
 ## How it works
 
