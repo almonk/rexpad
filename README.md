@@ -29,6 +29,8 @@ what's left at a glance, without scrolling back through the transcript.
   any terminal that supports the kitty graphics protocol, but opening the pane
   automatically needs Rex.
 - Go 1.27 or later to build it.
+- To check items off with a click, a terminal that reports mouse positions
+  in pixels (mode 1016), as Rex does. In other terminals, clicks do nothing.
 - For the exact look on macOS, the static **SF Pro** fonts from
   [developer.apple.com/fonts](https://developer.apple.com/fonts/). The system's
   built-in SF is a variable font, and the renderer draws only its default
@@ -45,6 +47,9 @@ go install github.com/almonk/rexpad@latest
 
 This puts `rexpad` in `$(go env GOPATH)/bin` (usually `~/go/bin`). Make sure
 that directory is on your `PATH`.
+
+A pane that is open keeps the viewer that it started with. After an
+upgrade, run `rexpad hide` and then `rexpad show` to get the new viewer.
 
 Or build from a clone:
 
@@ -149,7 +154,8 @@ rexpad wait       # wait until you click any item
 `wait` prints the items that carry the mark, in the format of `rexpad get`,
 and exits. If an item already carries the mark when `wait` starts, `wait`
 exits at once, so a click never gets lost. An agent runs `wait` as a
-background command and continues when it exits.
+background command and continues when it exits. `set` replaces every item
+and drops the marks, so an agent does not use `set` while a `wait` runs.
 
 To open a pane that ignores clicks, run `rexpad show --no-click`.
 
@@ -261,7 +267,8 @@ values it started with, so run `hide` and then `show` to apply a change.
   old ones are deleted, so updates don't flicker.
 - **Clicks**: the viewer asks for mouse reports with positions in pixels
   (modes 1000, 1006, and 1016), and maps each click to a row of the frame
-  on screen. A press and a release on the same checkbox toggle the item.
+  on screen. Clicks work only after the terminal confirms mode 1016 (a
+  DECRQM reply), because cell positions would land on the wrong rows. A press and a release on the same checkbox toggle the item.
   Then the viewer runs `rex block focus` on the agent's pane, which `show`
   gives it.
 - **Find**: rows fold away like an accordion. Only how open each row is

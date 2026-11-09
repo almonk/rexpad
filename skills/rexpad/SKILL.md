@@ -68,8 +68,9 @@ again. Keep the `{#ID}` suffixes to preserve IDs, or drop them to renumber.
 
 Some steps need the user, for example a login, an approval, or a value that
 only they know. Add each one as an item, and ask the user to click its box
-in the pane when they finish. Then run `rexpad wait` as a background
-command, so that you continue when the user clicks:
+in the pane when they finish. The pane must be open (`rexpad show`), or the
+user has no box to click. Then run `rexpad wait` as a background command,
+so that you continue when the user clicks:
 
 ```bash
 rexpad add -g "Your part" "Log in to the AWS console"   # prints the ID, here 5
@@ -88,6 +89,10 @@ rexpad wait 5    # in the background: exits when the user clicks box 5
 - After you act on a click, clear its mark with a command on the item, for
   example `rexpad done 5`. Otherwise the next `rexpad wait` exits at once
   for the same click.
+- `set` replaces every item and drops the user's marks. While a `wait`
+  runs, change the list with `add`, `edit`, `done`, and `rm`, not `set`.
+  Before a `set`, run `rexpad get --json` and act on each item that has
+  `"by": "user"`.
 
 ## End of a task
 
