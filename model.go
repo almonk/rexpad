@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 type Status string
@@ -23,11 +25,73 @@ type Item struct {
 	ID     int    `json:"id"`
 	Text   string `json:"text"`
 	Status Status `json:"status"`
+	// By is byUser when the user set Status by clicking the item's box in
+	// the viewer. Any command that changes the item clears it, so it means
+	// a change that the agent did not act on yet.
+	By string `json:"by,omitempty"`
 
 	// lines are where Text's wrapped lines start, as byte offsets, for the
 	// width the list was last wrapped at (see renderer.wrapList); nil is
 	// one line.
 	lines []int
+}
+
+const byUser = "user"
+
+// setByCommand and editByCommand are how commands change an item. They
+// clear the user's mark, which says that the agent did not act on a click yet.
+func (it *Item) setByCommand(st Status)    { it.Status, it.By = st, "" }
+func (it *Item) editByCommand(text string) { it.Text, it.By = text, "" }
+
+// clickedStatus is the status a click on an item's box gives it: a done
+// item opens again, and anything else is done.
+func clickedStatus(shown Status) Status {
+	if shown == StatusDone {
+		return StatusPending
+	}
+	return StatusDone
+}
+
+// toggleByUser applies a click on item id's box, as the user's change.
+// shown is the status the viewer showed: the click means what the user saw,
+// even if the list changed since the last frame.
+func toggleByUser(path string, id int, shown Status) error {
+	return updateList(path, func(l *List) error {
+		it := l.find(id)
+		if it == nil {
+			return fmt.Errorf("no item %d", id)
+		}
+		it.Status, it.By = clickedStatus(shown), byUser
+		return nil
+	})
+}
+
+// toggleCollapsedByUser applies a click on the header of the group that
+// groupKeys names key. shown is whether the viewer showed it collapsed: the
+// click means what the user saw, even if the list changed since the last frame.
+func toggleCollapsedByUser(path, key string, shown bool) error {
+	return updateList(path, func(l *List) error {
+		g := l.groupByKey(key)
+		if g == nil {
+			title, _, _ := strings.Cut(key, "\x00")
+			return fmt.Errorf("no group %q", title)
+		}
+		g.Collapsed = !shown
+		return nil
+	})
+}
+
+// expandGroupOf expands the group that holds item id, so that the item
+// shows.
+func expandGroupOf(path string, id int) error {
+	return updateList(path, func(l *List) error {
+		g := l.groupOf(id)
+		if g == nil {
+			return fmt.Errorf("no item %d", id)
+		}
+		g.Collapsed = false
+		return nil
+	})
 }
 
 // extra is how much taller than one line the item is, in points.
@@ -42,7 +106,11 @@ type Group struct {
 	Title string `json:"title"`
 	// Progress overrides the ring's fill (0 to 1). Unset, it's the share of done items.
 	Progress *float64 `json:"progress,omitempty"`
-	Items    []Item   `json:"items"`
+	// Collapsed hides the group's items. The user changes it with a click
+	// on the group's header in the viewer, and an agent with collapse or
+	// expand.
+	Collapsed bool   `json:"collapsed,omitempty"`
+	Items     []Item `json:"items"`
 }
 
 type List struct {
@@ -51,6 +119,10 @@ type List struct {
 
 	wrapKey string // the width and scale its items are wrapped for
 }
+
+// folded says the group's items are hidden. Only a group with a title
+// folds: without one, it has no header to click open again.
+func (g *Group) folded() bool { return g.Collapsed && g.Title != "" }
 
 func (g *Group) progress() float64 {
 	if g.Progress != nil {
@@ -122,6 +194,8 @@ func loadList(path string) (*List, error) {
 	return &l, nil
 }
 
+// saveList writes l to a temp file and renames it into place, so a reader
+// never sees half a list. Callers hold the list's lock (withListLock).
 func saveList(path string, l *List) error {
 	l.normalize()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -131,11 +205,61 @@ func saveList(path string, l *List) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(tmp.Name()) // a no-op once the rename succeeds
+	_, err = tmp.Write(append(data, '\n'))
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp.Name(), 0o644) // CreateTemp makes it private
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+// withListLock runs fn while it holds an exclusive lock on path's list.
+// Every writer takes it, so the CLI and the viewer never lose each other's
+// changes between a load and a save.
+func withListLock(path string, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close() // closing the file also releases the lock
+	for {
+		err = unix.Flock(int(f.Fd()), unix.LOCK_EX)
+		if err != unix.EINTR {
+			break
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("lock %s: %w", path, err)
+	}
+	return fn()
+}
+
+// updateList loads the list at path, applies change, and saves it, all
+// under the list's lock.
+func updateList(path string, change func(l *List) error) error {
+	return withListLock(path, func() error {
+		l, err := loadList(path)
+		if err != nil {
+			return err
+		}
+		if err := change(l); err != nil {
+			return err
+		}
+		return saveList(path, l)
+	})
 }
 
 // normalize fills in IDs and statuses so hand-written JSON works.
@@ -182,6 +306,17 @@ func (l *List) find(id int) *Item {
 	return nil
 }
 
+func (l *List) groupOf(id int) *Group {
+	for gi := range l.Groups {
+		for _, it := range l.Groups[gi].Items {
+			if it.ID == id {
+				return &l.Groups[gi]
+			}
+		}
+	}
+	return nil
+}
+
 func (l *List) remove(id int) bool {
 	for gi := range l.Groups {
 		items := l.Groups[gi].Items
@@ -195,8 +330,46 @@ func (l *List) remove(id int) bool {
 	return false
 }
 
+// groupKeys names each group so a group can be followed across reloads
+// and rewrites of the list: its title, and which of the groups with that title it is.
+func groupKeys(l *List) map[*Group]string {
+	keys := map[*Group]string{}
+	seen := map[string]int{}
+	for gi := range l.Groups {
+		g := &l.Groups[gi]
+		keys[g] = fmt.Sprint(g.Title, "\x00", seen[g.Title])
+		seen[g.Title]++
+	}
+	return keys
+}
+
+// groupByKey is the group that groupKeys names key, or nil.
+func (l *List) groupByKey(key string) *Group {
+	for g, k := range groupKeys(l) {
+		if k == key {
+			return g
+		}
+	}
+	return nil
+}
+
+// keepCollapsed collapses each group of l that old had collapsed under the
+// same title. Groups that share a title pair up in order.
+func (l *List) keepCollapsed(old *List) {
+	collapsed := map[string]bool{}
+	for g, k := range groupKeys(old) {
+		collapsed[k] = g.Collapsed
+	}
+	for g, k := range groupKeys(l) {
+		g.Collapsed = g.Collapsed || collapsed[k]
+	}
+}
+
 // group finds a group by case-insensitive title prefix, or by 1-based index.
 func (l *List) group(ref string) *Group {
+	if ref == "" {
+		return nil // every title starts with "", so it would name the first group
+	}
 	if n, err := strconv.Atoi(ref); err == nil && n >= 1 && n <= len(l.Groups) {
 		return &l.Groups[n-1]
 	}

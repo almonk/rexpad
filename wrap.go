@@ -39,18 +39,16 @@ func (r *renderer) wrapList(l *List, right float64) bool {
 // each line starts, in bytes.
 func (r *renderer) wrapText(s string, maxW float64) []int {
 	s = strings.ReplaceAll(s, "\t", " ")
-	face := r.fonts.face(false, fontSize*r.scale)
-	track := tracking * fontSize * r.scale
 	limit := maxW * r.scale
 	starts := []int{0}
-	if maxW <= 0 || r.measure(face, s, track) <= limit {
+	if maxW <= 0 || r.measure(s, false) <= limit {
 		return starts
 	}
 	start, brk := 0, -1 // the line's start, and the last place it could break
 	for i := 0; i < len(s); {
 		_, size := utf8.DecodeRuneInString(s[i:])
 		end := i + size
-		if i > start && r.measure(face, strings.TrimRight(s[start:end], " "), track) > limit {
+		if i > start && r.measure(strings.TrimRight(s[start:end], " "), false) > limit {
 			next := i // mid-word, if the line has no space to break at
 			if brk > start {
 				next = brk

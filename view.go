@@ -21,21 +21,85 @@ import (
 )
 
 type viewOptions struct {
-	theme string  // terminal (follow the terminal's colors), light, or dark
-	scale float64 // device pixels per point; 0 picks from the cell size
+	theme   string  // terminal (follow the terminal's colors), light, or dark
+	scale   float64 // device pixels per point; 0 picks from the cell size
+	noClick bool    // clicks do not toggle items or collapse groups
 }
 
-type winSize struct{ rows, cols, xpix, ypix int }
+// clickHit is what a click is on: an item's box, a group's header, or
+// neither (both nil).
+type clickHit struct {
+	item  *Item
+	group *Group
+}
+
+// clickedAt is what a click at pixel c is on, in the frame drawn at scale
+// and scrolled offsetPx down, with the rows where geo puts them. The find
+// bar covers the pane from viewPx down.
+func clickedAt(l *List, geo []rowGeo, c mouseClick, scale float64, offsetPx, viewPx int) clickHit {
+	if c.y >= viewPx {
+		return clickHit{}
+	}
+	x, y := float64(c.x)/scale, float64(c.y+offsetPx)/scale
+	if it := hitItem(l, geo, x, y); it != nil {
+		return clickHit{item: it}
+	}
+	return clickHit{group: hitHeader(l, geo, x, y)}
+}
+
+// clickTarget names what a click is on, so that a press and its release
+// compare equal across reloads of the list: an item by its ID, a header by
+// its groupKeys key. The zero value is neither.
+type clickTarget struct {
+	item  int
+	group string
+}
+
+func (h clickHit) target(l *List) clickTarget {
+	switch {
+	case h.item != nil:
+		return clickTarget{item: h.item.ID}
+	case h.group != nil:
+		return clickTarget{group: groupKeys(l)[h.group]}
+	}
+	return clickTarget{}
+}
+
+// clickTracker pairs a press with its release: a click acts only when the
+// button goes down and comes up on the same box or header.
+type clickTracker struct{ pressed clickTarget }
+
+// add takes a press or release on target on and returns what to toggle,
+// or the zero target.
+func (t *clickTracker) add(c mouseClick, on clickTarget) clickTarget {
+	if !c.release {
+		t.pressed = on
+		return clickTarget{}
+	}
+	downOn := t.pressed
+	t.pressed = clickTarget{}
+	if on != downOn {
+		return clickTarget{}
+	}
+	return on
+}
+
+// winSize is the pane's size. guessed says the terminal reported no pixel
+// size, so xpix and ypix are made up.
+type winSize struct {
+	rows, cols, xpix, ypix int
+	guessed                bool
+}
 
 func getWinSize(fd int) winSize {
 	ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
 	if err != nil || ws.Row == 0 || ws.Col == 0 {
-		return winSize{rows: 24, cols: 80, xpix: 80 * 16, ypix: 24 * 34}
+		return winSize{rows: 24, cols: 80, xpix: 80 * 16, ypix: 24 * 34, guessed: true}
 	}
 	w := winSize{rows: int(ws.Row), cols: int(ws.Col), xpix: int(ws.Xpixel), ypix: int(ws.Ypixel)}
 	if w.xpix == 0 || w.ypix == 0 {
 		// No pixel size reported: assume a Retina cell.
-		w.xpix, w.ypix = w.cols*16, w.rows*34
+		w.xpix, w.ypix, w.guessed = w.cols*16, w.rows*34, true
 	}
 	return w
 }
@@ -247,13 +311,15 @@ func runView(name string, opt viewOptions) error {
 
 	w := bufio.NewWriterSize(out, 1<<16)
 	// Alternate screen, hidden cursor, color-scheme change reports (2031),
-	// mouse reports in SGR form (1000, 1006) so the wheel scrolls the list,
-	// bracketed paste (2004), and the kitty keyboard protocol's disambiguate
-	// flag (> 1 u) so Command and Option keys reach the find field.
-	fmt.Fprint(w, "\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J\x1b[?2031h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[>1u")
+	// mouse reports in SGR form (1000, 1006) so the wheel scrolls the list
+	// and clicks reach the checkboxes, with positions in pixels (1016) so a
+	// click lands on the right row, bracketed paste (2004), and the kitty
+	// keyboard protocol's disambiguate flag (> 1 u) so Command and Option
+	// keys reach the find field.
+	fmt.Fprint(w, "\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J\x1b[?2031h\x1b[?1000h\x1b[?1006h\x1b[?1016h\x1b[?2004h\x1b[>1u")
 	w.Flush()
 	defer func() {
-		fmt.Fprint(w, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[<u\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?2031l\x1b[?25h\x1b[?1049l")
+		fmt.Fprint(w, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[<u\x1b[?2004l\x1b[?1016l\x1b[?1006l\x1b[?1000l\x1b[?2031l\x1b[?25h\x1b[?1049l")
 		w.Flush()
 	}()
 
@@ -342,6 +408,7 @@ func runView(name string, opt viewOptions) error {
 		findFrom float64 // the view's top when the find started, in points
 		bar      sheet   // the find bar's image; valid while it's placed
 		listRows int     // rows the list's placement covers, under the bar
+		listPx   int     // and their height in pixels
 		lastFind string  // what the bar last showed, to skip redraws
 
 		// Collapsing: while find is open (and while the list folds back open
@@ -486,6 +553,7 @@ func runView(name string, opt viewOptions) error {
 			changed, listRows = true, rows
 		}
 		widthPx, viewPx := cellW*ws.cols, cellH*rows
+		listPx = viewPx
 		viewH = float64(viewPx) / scale
 		followTo, maxOff := followOffset(list, viewH)
 		maxOffset = maxOff
@@ -599,7 +667,7 @@ func runView(name string, opt viewOptions) error {
 
 		newRenderer := func() *renderer {
 			r := &renderer{fonts: fonts, scale: scale, pal: drawPal(), marks: find.spans(), geo: geo, geoH: contentH, clear: clear, icons: maps.Clone(icons),
-				spins: maps.Clone(spins), dots: moving, dotsPhase: time.Since(dotsEpoch).Seconds()}
+				spins: maps.Clone(spins), dots: moving, dotsPhase: time.Since(dotsEpoch).Seconds(), noClick: opt.noClick}
 			if ring.alpha > 0 {
 				g := ring
 				r.ring = &g
@@ -737,19 +805,11 @@ func runView(name string, opt viewOptions) error {
 			measure := &renderer{fonts: fonts, scale: scale, pal: pal}
 			right := float64(widthPx)/scale - marginRight
 			if !moving {
-				rws, _ := layout(list)
-				for i, rw := range rws {
-					if rw.kind != rowItem || spins[rw.item.ID] < 1 || rw.item.Status != StatusActive {
+				for _, rw := range drawnRows(list, geo) {
+					if rw.kind != rowItem || rw.open < 1 || spins[rw.item.ID] < 1 || rw.item.Status != StatusActive {
 						continue
 					}
-					c := rw.center
-					if geo != nil && len(geo) == len(rws) {
-						if geo[i].open < 1 {
-							continue
-						}
-						c = geo[i].center
-					}
-					want = append(want, struct{ center, x float64 }{c + rw.extra, measure.dotsX(rw.item, right, 1)})
+					want = append(want, struct{ center, x float64 }{rw.center + rw.extra, measure.dotsX(rw.item, right, 1)})
 				}
 			}
 			fadePx := 0
@@ -986,13 +1046,21 @@ func runView(name string, opt viewOptions) error {
 		scrollTo(math.Min(c-viewH/3, math.Max(0, geoToH-viewH)))
 	}
 	// closeFind folds the whole list back open and keeps the match that was
-	// current in view, so Esc lands you on what you found, in context.
+	// current in view, so Esc lands you on what you found, in context. A
+	// match in a collapsed group would fold away, so its group expands,
+	// unless the pane is read-only.
 	closeFind := func() {
 		m, ok := find.current()
+		if !opt.noClick {
+			if err := find.expandFoldedMatch(path, list); err != nil {
+				fmt.Fprint(w, "\a") // the view lands on the group's header instead
+			}
+		}
 		find = findState{}
 		refold()
 		draw(true) // the bar's rows go back to the list first
-		if ok {
+		// The reload can drop rows that an agent removed meanwhile.
+		if ok && m.row < len(geoTo) {
 			scrollTo(math.Max(0, math.Min(geoTo[m.row].center-viewH/3, geoToH-viewH)))
 		} else {
 			scrollTo(findFrom)
@@ -1107,7 +1175,43 @@ func runView(name string, opt viewOptions) error {
 		return false
 	}
 
+	// handleClick toggles an item, or collapses or expands a group, when
+	// the button goes down and comes up on the item's box or the group's
+	// header. Focus stays in this pane.
+	//
+	// Clicks work only once the terminal confirms that it reports pixels
+	// (mode 1016): a terminal that reports cells instead would put every
+	// click on the first rows. A made-up pixel size cannot be mapped either.
+	var clicks clickTracker
+	pixelReports := false
+	handleClick := func(c mouseClick) {
+		if opt.noClick || !pixelReports || lastSize.guessed {
+			return
+		}
+		hit := clickedAt(list, geo, c, scale, int(math.Round(shown*scale)), listPx)
+		on := hit.target(list)
+		if clicks.add(c, on) == (clickTarget{}) {
+			return
+		}
+		var err error
+		if hit.item != nil {
+			err = toggleByUser(path, hit.item.ID, hit.item.Status)
+		} else {
+			err = toggleCollapsedByUser(path, on.group, hit.group.Collapsed)
+		}
+		if err != nil {
+			// The pane has no room for a message: the bell says the
+			// click did not take, and the box or arrow shows it unchanged.
+			fmt.Fprint(w, "\a")
+		}
+		draw(false)
+	}
+
 	draw(true)
+	// Asked here, not with the modes above: the wait for the theme's colors
+	// reads and drops every other reply.
+	fmt.Fprint(w, "\x1b[?1016$p")
+	w.Flush()
 	tick := time.NewTicker(150 * time.Millisecond)
 	defer tick.Stop()
 	defer stopAnim()
@@ -1157,6 +1261,12 @@ func runView(name string, opt viewOptions) error {
 				}
 			case ev.scroll != scrollNone:
 				scrollBy(ev.scroll)
+			case ev.mode != nil:
+				if ev.mode.mode == 1016 {
+					pixelReports = ev.mode.on()
+				}
+			case ev.click != nil:
+				handleClick(*ev.click)
 			case ev.paste != "":
 				if find.input {
 					find.edit.paste(ev.paste)

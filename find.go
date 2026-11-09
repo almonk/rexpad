@@ -35,7 +35,7 @@ type findState struct {
 	input   bool      // typing into it
 	edit    textField // the bar's text field
 	query   string    // what the list is filtered by: the field's text
-	vis     []bool    // which of layout's rows show; nil shows them all
+	vis     []bool    // which of layout's rows show; nil shows all but collapsed groups' items
 	matches []rowMatch
 	cur     int // index into matches
 }
@@ -231,6 +231,34 @@ func (f *findState) current() (rowMatch, bool) {
 	return rowMatch{}, false
 }
 
+// foldedMatch is the ID of the current match's item when the item's group
+// is collapsed, so the item hides once find closes; otherwise 0.
+func (f *findState) foldedMatch(l *List) int {
+	m, ok := f.current()
+	if !ok || m.itemID == 0 {
+		return 0
+	}
+	if g := l.groupOf(m.itemID); g == nil || !g.folded() {
+		return 0
+	}
+	return m.itemID
+}
+
+// expandFoldedMatch expands the collapsed group that holds the current
+// match, in the stored list at path and in l, so that the match stays in
+// view once find closes.
+func (f *findState) expandFoldedMatch(path string, l *List) error {
+	id := f.foldedMatch(l)
+	if id == 0 {
+		return nil
+	}
+	if err := expandGroupOf(path, id); err != nil {
+		return err
+	}
+	l.groupOf(id).Collapsed = false
+	return nil
+}
+
 // spans groups the matches by row for the renderer.
 func (f *findState) spans() map[int][]span {
 	if f == nil || len(f.matches) == 0 {
@@ -254,16 +282,13 @@ type rowGeo struct{ center, open float64 }
 // collapseTau sets the pace of the fold; a change settles in about 4 tau.
 const collapseTau = 60 * time.Millisecond
 
-// geoFor is the resting geometry of l's rows with only vis showing (all of
-// them when vis is nil), and the content height.
+// geoFor is the resting geometry of l's rows with only vis showing (when vis
+// is nil, all but the items of collapsed groups), and the content height.
 func geoFor(l *List, vis []bool) ([]rowGeo, float64) {
 	rows, h := layoutVis(l, vis)
 	g := make([]rowGeo, len(rows))
 	for i, rw := range rows {
-		g[i] = rowGeo{rw.center, 1}
-		if vis != nil && !vis[i] {
-			g[i].open = 0
-		}
+		g[i] = rowGeo{rw.center, rw.open}
 	}
 	return g, h
 }
@@ -330,7 +355,7 @@ func easeRingBy(g, to ringGeo, dt time.Duration, scale float64, tau time.Duratio
 }
 
 // arrivalGeo is where nl's rows start after the list changed from old,
-// whose rows were at oldGeo (nil: at rest, all open): a row that was there
+// whose rows were at oldGeo (nil: at rest): a row that was there
 // keeps how open it was, and a new one starts folded shut, so it unfolds
 // into place. Items are the same by ID, or else by group and text, so
 // rewriting a plan with set doesn't replay it; groups are the same by title.
@@ -422,8 +447,7 @@ func (r *renderer) findBar(f *findState, widthPx, heightPx int, cy, fieldX float
 	r.magnifier(img, fieldX-(textX-iconCenterX), cy)
 	end := right
 	if status := f.status(); status != "" {
-		face := r.fonts.face(false, fontSize*s)
-		w := r.measure(face, status, tracking*fontSize*s) / s
+		w := r.measure(status, false) / s
 		r.text(img, status, right-w, cy+baselineOffset, false, r.pal.doneText, 0)
 		end = right - w - 12
 	}

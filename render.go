@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
@@ -9,7 +8,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"golang.org/x/image/font"
 	"golang.org/x/image/math/fixed"
 	"golang.org/x/image/vector"
 )
@@ -18,11 +16,6 @@ import (
 // screenshot of a Things-style project list). Every vertical position is
 // relative to the center line of the row it belongs to.
 const (
-	fontSize = 14.0
-	// Apple's SF Pro tracking at 14pt is -0.154pt; the static fonts don't
-	// apply it on their own.
-	tracking = -0.011 // em
-
 	// No padding of its own: the margins are just enough that the active
 	// row's highlight (activeInset past the content) meets the pane's edges.
 	marginLeft  = activeInset
@@ -51,6 +44,15 @@ const (
 	boxCenter = 8.5 // checkbox center from the content's left edge
 
 	activeInset = 6.0 // active row highlight extends this far left of the content edge
+
+	// The disclosure arrow at the right of a group's header: a chevron
+	// arrowArm either side of its center and arrowDepth from its arms to
+	// its tip, centered arrowInset left of the content's right edge.
+	arrowInset  = 6.0
+	arrowArm    = 3.5
+	arrowDepth  = 1.75
+	arrowStroke = 0.75                      // half the line's width
+	arrowRoom   = arrowInset + arrowArm + 8 // what a title leaves free for it
 )
 
 type palette struct {
@@ -158,6 +160,9 @@ type renderer struct {
 	// is and how open it is, for collapsing; geoH is the content height then.
 	geo  []rowGeo
 	geoH float64
+	// glyphRas and glyphMask are reused for every glyph drawn.
+	glyphRas  *vector.Rasterizer
+	glyphMask image.Alpha
 	// ring is the current match's outline, drawn over the rows where it is
 	// on its way to; nil draws none.
 	ring *ringGeo
@@ -168,6 +173,9 @@ type renderer struct {
 	spins     map[int]float64
 	dots      bool
 	dotsPhase float64
+	// noClick leaves out the headers' arrows, since a header that cannot
+	// be clicked has no use for one, and gives titles their room.
+	noClick bool
 	// icons, by groupKeys, is how far each group's ring is in while it
 	// animates; iconKeys is groupKeys of the list being drawn.
 	icons    map[string]float64
@@ -224,6 +232,7 @@ type row struct {
 	kind   rowKind
 	center float64 // the first line's center, in points from the top of the content
 	extra  float64 // how much taller than one line it is: its wrapped lines
+	open   float64 // how much of its room it takes: 1 shows, 0 is folded away
 	group  *Group
 	item   *Item
 }
@@ -247,12 +256,16 @@ func layoutVis(l *List, vis []bool) (rows []row, height float64) {
 
 // layoutOpen is the layout with each row taking up its share of room: open
 // is 1 for a row that shows, 0 for one folded away, and in between while it
-// folds (all 1 when open is nil). Rows stack like an accordion, so folding
-// rows shrink into their own slots and never overlap their neighbors. With
-// only 0s and 1s it's exactly the layout of the rows that show.
+// folds. When open is nil, every row shows except the items of a collapsed
+// group. Rows stack like an accordion, so folding rows shrink into their own
+// slots and never overlap their neighbors. With only 0s and 1s it's exactly
+// the layout of the rows that show.
 func layoutOpen(l *List, open []float64) (rows []row, height float64) {
-	w := func(i int) float64 {
+	w := func(i int, folded bool) float64 {
 		if open == nil {
+			if folded {
+				return 0
+			}
 			return 1
 		}
 		if i < len(open) {
@@ -266,9 +279,9 @@ func layoutOpen(l *List, open []float64) (rows []row, height float64) {
 		g := &l.Groups[gi]
 		head := 1.0
 		if g.Title != "" {
-			head = w(len(rows))
+			head = w(len(rows), false)
 			// A folding header rises a little into the gap above it.
-			rows = append(rows, row{kind: rowHeader, center: y - (1-head)*itemPitch/2, group: g})
+			rows = append(rows, row{kind: rowHeader, center: y - (1-head)*itemPitch/2, open: head, group: g})
 			if head > 0 {
 				bottom = math.Max(bottom, rows[len(rows)-1].center+(itemPitch/2)*head+marginBot)
 			}
@@ -280,12 +293,12 @@ func layoutOpen(l *List, open []float64) (rows []row, height float64) {
 		}
 		sum, room := 0.0, 0.0 // how many items show, and the room they take
 		for ii := range g.Items {
-			wi := w(len(rows))
+			wi := w(len(rows), g.folded())
 			it := &g.Items[ii]
 			ex := it.extra()
 			h := itemPitch + ex // a wrapped item is taller by its extra lines
 			// Folding, the item stays centered in its shrinking slot.
-			rows = append(rows, row{kind: rowItem, center: cursor + wi*h/2 - ex/2, extra: ex, group: g, item: it})
+			rows = append(rows, row{kind: rowItem, center: cursor + wi*h/2 - ex/2, extra: ex, open: wi, group: g, item: it})
 			if wi > 0 {
 				bottom = math.Max(bottom, cursor+wi*h+marginBot)
 			}
@@ -306,6 +319,53 @@ func layoutOpen(l *List, open []float64) (rows []row, height float64) {
 	return rows, bottom
 }
 
+// boxHitRight is the right edge of the strip where a click toggles an
+// item: the checkbox column, out to halfway between the box and the text.
+const boxHitRight = marginLeft + (boxCenter+boxSize/2+textX)/2
+
+// drawnRows is l's rows where Render draws them: where geo puts them when
+// it has a row for each row, else in the resting layout.
+func drawnRows(l *List, geo []rowGeo) []row {
+	rows, _ := layout(l)
+	if len(geo) != len(rows) {
+		return rows
+	}
+	for i := range rows {
+		rows[i].center, rows[i].open = geo[i].center, geo[i].open
+	}
+	return rows
+}
+
+// hitItem is the item whose checkbox column holds the point (x, y), in
+// content points, or nil. geo is as for drawnRows; a click cannot hit a
+// row that is not fully open.
+func hitItem(l *List, geo []rowGeo, x, y float64) *Item {
+	if x < 0 || x >= boxHitRight {
+		return nil
+	}
+	for _, rw := range drawnRows(l, geo) {
+		if rw.kind == rowItem && rw.open >= 1 && y >= rw.center-itemPitch/2 && y < rw.center+itemPitch/2+rw.extra {
+			return rw.item
+		}
+	}
+	return nil
+}
+
+// hitHeader is the group whose header holds the point (x, y), in content
+// points, or nil. A header reaches across the pane, from half a row above
+// its center line down to its divider. geo is as for hitItem.
+func hitHeader(l *List, geo []rowGeo, x, y float64) *Group {
+	if x < 0 {
+		return nil
+	}
+	for _, rw := range drawnRows(l, geo) {
+		if rw.kind == rowHeader && rw.open >= 1 && y >= rw.center-itemPitch/2 && y < rw.center+dividerOffset {
+			return rw.group
+		}
+	}
+	return nil
+}
+
 // followOffset is the scroll offset, in points, that keeps the first active
 // item (or else the first open one) in view with some context above it, and
 // the largest offset the content allows in a view viewH points tall.
@@ -315,17 +375,17 @@ func followOffset(l *List, viewH float64) (offset, maxOffset float64) {
 	if maxOffset == 0 {
 		return 0, 0
 	}
-	focus := -1.0
-	for _, rw := range rows {
+	focus := -1
+	for i, rw := range rows {
 		if rw.kind == rowItem && rw.item.Status == StatusActive {
-			focus = rw.center
+			focus = i
 			break
 		}
 	}
 	if focus < 0 {
-		for _, rw := range rows {
+		for i, rw := range rows {
 			if rw.kind == rowItem && rw.item.Status != StatusDone {
-				focus = rw.center
+				focus = i
 				break
 			}
 		}
@@ -333,7 +393,22 @@ func followOffset(l *List, viewH float64) (offset, maxOffset float64) {
 	if focus < 0 {
 		return 0, maxOffset
 	}
-	return math.Max(0, math.Min(focus-viewH/3, maxOffset)), maxOffset
+	y := rows[focus].center
+	if rows[focus].open < 1 {
+		// The user collapsed its group: show the group's header instead.
+		y = headerCenter(rows, rows[focus].group)
+	}
+	return math.Max(0, math.Min(y-viewH/3, maxOffset)), maxOffset
+}
+
+// headerCenter is the center of g's header row among rows.
+func headerCenter(rows []row, g *Group) float64 {
+	for _, rw := range rows {
+		if rw.kind == rowHeader && rw.group == g {
+			return rw.center
+		}
+	}
+	return 0
 }
 
 // Render draws the list into an image of exactly widthPx x heightPx device
@@ -346,15 +421,13 @@ func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image
 
 	s := r.scale
 	r.wrapList(l, float64(widthPx)/s-marginRight)
-	rows, contentH := layout(l)
+	rows := drawnRows(l, r.geo)
+	_, contentH := layout(l)
+	if len(r.geo) == len(rows) {
+		contentH = r.geoH
+	}
 	if r.icons != nil {
 		r.iconKeys = groupKeys(l)
-	}
-	geo := r.geo
-	if len(geo) != len(rows) {
-		geo = nil
-	} else {
-		contentH = r.geoH
 	}
 	if len(rows) == 0 {
 		r.text(img, "No tasks yet", marginLeft+textX, marginTop+baselineOffset, false, r.pal.doneText, 0)
@@ -366,11 +439,8 @@ func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image
 	left := marginLeft
 	right := float64(widthPx)/s - marginRight
 	for i, rw := range rows {
-		center, open := rw.center, 1.0
-		if geo != nil {
-			center, open = geo[i].center, geo[i].open
-		}
-		cy := center - offset
+		open := rw.open
+		cy := rw.center - offset
 		if open <= 0 || cy < -itemPitch-rw.extra || cy > viewH+itemPitch {
 			continue
 		}
@@ -419,7 +489,13 @@ func (r *renderer) row(img *image.RGBA, i int, rw row, left, right, cy float64) 
 			r.groupIcon(img, edge+iconRadius*show, cy, rw.group.progress(), show)
 		}
 		tx := edge + 0.25 + show*(left+titleX-edge-0.25)
-		r.textMarked(img, rw.group.Title, tx, cy+baselineOffset, true, r.pal.title, right-tx, r.marks[i])
+		titleRight := right
+		if !r.noClick {
+			titleRight -= arrowRoom
+			r.disclosure(img, right-arrowInset, cy, rw.group.Collapsed)
+		}
+		// At least 1: fit draws a width of 0 or less in full, past the edge.
+		r.textMarked(img, rw.group.Title, tx, cy+baselineOffset, true, r.pal.title, max(1, titleRight-tx), r.marks[i])
 		r.fillRect(img, left, cy+dividerOffset, right, cy+dividerOffset+1, r.pal.divider)
 	case rowItem:
 		r.item(img, rw.item, left, right, cy, r.marks[i])
@@ -481,9 +557,8 @@ func (r *renderer) text(img *image.RGBA, s string, x, y float64, bold bool, col 
 // byte ranges of s; a match cut off by the ellipsis highlights the ellipsis.
 // (The current match is marked by an outline around its row, not here.)
 func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool, col color.RGBA, maxW float64, marks []span) (float64, bool) {
-	face := r.fonts.face(bold, fontSize*r.scale)
-	track := tracking * fontSize * r.scale
 	s, kept, truncated := r.fit(s, bold, maxW)
+	run := r.layout(s, bold)
 
 	// Highlights, mapped onto the drawn string, filled as one path so
 	// neighbors that touch don't darken where they overlap.
@@ -496,29 +571,16 @@ func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool
 		if a >= b {
 			continue
 		}
-		x0 := x + r.measure(face, s[:a], track)/r.scale - 1
-		x1 := x + r.measure(face, s[:b], track)/r.scale + 1
+		x0 := x + r.xAt(s, run, a)/r.scale - 1
+		x1 := x + r.xAt(s, run, b)/r.scale + 1
 		cy := y - baselineOffset
 		hl.poly(roundRect(x0, cy-9, x1, cy+9, 3))
 	}
 	hl.fill(r.tint(0.38))
 
-	src := image.NewUniform(col)
-	dot := fixed.Point26_6{X: fixed.Int26_6(x * r.scale * 64), Y: fixed.Int26_6(math.Round(y*r.scale) * 64)}
-	start := dot.X
-	prev := rune(-1)
-	for _, c := range s {
-		if prev >= 0 {
-			dot.X += face.Kern(prev, c)
-		}
-		dr, mask, mp, adv, ok := face.Glyph(dot, c)
-		if ok {
-			draw.DrawMask(img, dr, src, image.Point{}, mask, mp, draw.Over)
-		}
-		dot.X += adv + fixed.Int26_6(track*64)
-		prev = c
-	}
-	return float64(dot.X-start) / 64 / r.scale, truncated
+	origin := fixed.Point26_6{X: fixed.Int26_6(x * r.scale * 64), Y: fixed.Int26_6(math.Round(y*r.scale) * 64)}
+	r.drawRun(img, run, origin, col)
+	return float64(run.width) / 64 / r.scale, truncated
 }
 
 // fit is s as drawn in maxW points (no limit when maxW <= 0): cut with an
@@ -526,16 +588,16 @@ func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool
 // ellipsis.
 func (r *renderer) fit(s string, bold bool, maxW float64) (shown string, kept int, truncated bool) {
 	s = strings.ReplaceAll(s, "\t", " ") // fonts have no tab glyph
-	face := r.fonts.face(bold, fontSize*r.scale)
-	track := tracking * fontSize * r.scale
-	if maxW <= 0 || r.measure(face, s, track) <= maxW*r.scale {
+	run := r.layout(s, bold)
+	if maxW <= 0 || float64(run.width)/64 <= maxW*r.scale {
 		return s, len(s), false
 	}
+	s = s[:r.longestCandidate(s, run, maxW*r.scale)]
 	const ell = "…"
 	for len(s) > 0 {
 		_, size := utf8.DecodeLastRuneInString(s)
 		s = s[:len(s)-size]
-		if r.measure(face, trimRight(s)+ell, track) <= maxW*r.scale {
+		if r.measure(trimRight(s)+ell, bold) <= maxW*r.scale {
 			break
 		}
 	}
@@ -543,24 +605,37 @@ func (r *renderer) fit(s string, bold bool, maxW float64) (shown string, kept in
 	return s + ell, len(s), true
 }
 
+// longestCandidate is where fit starts cutting s, in bytes. Once a rune
+// starts past limit, every longer prefix is too wide, so fit only needs to
+// try the prefixes up to that rune instead of shaping one per rune from the
+// end. It keeps that rune too, because fit drops a rune before each try.
+func (r *renderer) longestCandidate(s string, run textRun, limit float64) int {
+	for _, g := range run.glyphs {
+		if float64(g.x)/64 < limit {
+			continue
+		}
+		cut := runeOffset(s, g.cluster)
+		_, size := utf8.DecodeRuneInString(s[cut:])
+		return cut + size
+	}
+	return len(s)
+}
+
+// runeOffset is the byte offset of rune n in s.
+func runeOffset(s string, n int) int {
+	for i := range s {
+		if n == 0 {
+			return i
+		}
+		n--
+	}
+	return len(s)
+}
+
 // textWidth is how wide fit's text is drawn, in points.
 func (r *renderer) textWidth(s string, bold bool, maxW float64) float64 {
 	shown, _, _ := r.fit(s, bold, maxW)
-	return r.measure(r.fonts.face(bold, fontSize*r.scale), shown, tracking*fontSize*r.scale) / r.scale
-}
-
-func (r *renderer) measure(face font.Face, s string, track float64) float64 {
-	var w fixed.Int26_6
-	prev := rune(-1)
-	for _, c := range s {
-		if prev >= 0 {
-			w += face.Kern(prev, c)
-		}
-		adv, _ := face.GlyphAdvance(c)
-		w += adv + fixed.Int26_6(track*64)
-		prev = c
-	}
-	return float64(w) / 64
+	return r.measure(shown, bold) / r.scale
 }
 
 func trimRight(s string) string {
@@ -711,19 +786,6 @@ func (r *renderer) groupIcon(img *image.RGBA, cx, cy, progress, show float64) {
 	}
 }
 
-// groupKeys names each group so a group's ring can be followed across
-// reloads: its title, and which of the groups with that title it is.
-func groupKeys(l *List) map[*Group]string {
-	keys := map[*Group]string{}
-	seen := map[string]int{}
-	for gi := range l.Groups {
-		g := &l.Groups[gi]
-		keys[g] = fmt.Sprint(g.Title, "\x00", seen[g.Title])
-		seen[g.Title]++
-	}
-	return keys
-}
-
 // iconShow is how far g's ring is in: from r.icons while it animates,
 // else 1 once anything in the group is under way and 0 before.
 func (r *renderer) iconShow(g *Group) float64 {
@@ -742,9 +804,26 @@ func (r *renderer) iconShow(g *Group) float64 {
 }
 
 func (r *renderer) checkmark(img *image.RGBA, bx, by float64) {
-	// A stroked polyline as a polygon: short leg then long leg.
-	pts := [][2]float64{{bx + 3.0, by + 6.2}, {bx + 5.1, by + 8.3}, {bx + 9.0, by + 3.8}}
-	const w = 0.75 // half stroke width
+	// Short leg then long leg.
+	r.stroke(img, [][2]float64{{bx + 3.0, by + 6.2}, {bx + 5.1, by + 8.3}, {bx + 9.0, by + 3.8}}, 0.75, r.pal.check)
+}
+
+// disclosure draws a group header's arrow centered at (cx, cy): pointing
+// down while the group is open, and right while it is collapsed.
+func (r *renderer) disclosure(img *image.RGBA, cx, cy float64, collapsed bool) {
+	pts := [][2]float64{{-arrowArm, -arrowDepth}, {0, arrowDepth}, {arrowArm, -arrowDepth}}
+	for i, p := range pts {
+		if collapsed {
+			p = [2]float64{p[1], -p[0]} // a quarter turn, from down to right
+		}
+		pts[i] = [2]float64{cx + p[0], cy + p[1]}
+	}
+	r.stroke(img, pts, arrowStroke, r.pal.doneText)
+}
+
+// stroke draws the polyline pts as a line that reaches w points either side
+// of it, each segment a polygon.
+func (r *renderer) stroke(img *image.RGBA, pts [][2]float64, w float64, col color.RGBA) {
 	p := r.path(img)
 	for i := 0; i+1 < len(pts); i++ {
 		a, b := pts[i], pts[i+1]
@@ -757,5 +836,5 @@ func (r *renderer) checkmark(img *image.RGBA, bx, by float64) {
 			{b[0] + nx + ex, b[1] + ny + ey}, {a[0] + nx - ex, a[1] + ny - ey},
 		})
 	}
-	p.fill(r.pal.check)
+	p.fill(col)
 }

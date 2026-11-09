@@ -51,13 +51,29 @@ func (k keyPress) is(code rune, mods int) bool { return k.code == code && k.mods
 
 // termEvent is one thing read from the terminal: a key press, pasted text,
 // an OSC reply, a color-scheme change report (CSI ? 997 ; n n, mode 2031),
-// or a mouse wheel tick.
+// a mouse wheel tick, a left click, or a reply to a mode query (DECRQM).
 type termEvent struct {
 	key    keyPress // code 0 when it isn't a key
 	paste  string
 	osc    string
 	scheme bool
 	scroll scrollKind
+	click  *mouseClick
+	mode   *modeReport
+}
+
+// modeReport is the terminal's reply to CSI ? mode $ p: CSI ? mode ; value $ y.
+type modeReport struct{ mode, value int }
+
+// on reports whether the mode is set (1) or permanently set (3). A terminal
+// that does not know the mode answers 0.
+func (m modeReport) on() bool { return m.value == 1 || m.value == 3 }
+
+// mouseClick is the left button going down or up, in pixels from the
+// pane's top left (mode 1016 reports pixels, not cells).
+type mouseClick struct {
+	x, y    int
+	release bool
 }
 
 type scrollKind int
@@ -74,23 +90,59 @@ const (
 	scrollBottom
 )
 
-// csiScroll maps an SGR mouse report (mode 1006, without the ESC [) to a
-// wheel tick.
+// sgrMouse is an SGR mouse report (mode 1006): the button code with its
+// modifier bits, the position, and whether the button went up.
+type sgrMouse struct {
+	btn, x, y int
+	release   bool
+}
+
+// parseSGRMouse reads an SGR mouse report, without the ESC [: < btn ; x ; y
+// then M for a press or m for a release.
+func parseSGRMouse(seq string) (sgrMouse, bool) {
+	release := strings.HasSuffix(seq, "m")
+	if !strings.HasPrefix(seq, "<") || !(release || strings.HasSuffix(seq, "M")) {
+		return sgrMouse{}, false
+	}
+	fields := strings.Split(seq[1:len(seq)-1], ";")
+	if len(fields) != 3 {
+		return sgrMouse{}, false
+	}
+	var n [3]int
+	for i, f := range fields {
+		v, err := strconv.Atoi(f)
+		if err != nil {
+			return sgrMouse{}, false
+		}
+		n[i] = v
+	}
+	return sgrMouse{btn: n[0], x: n[1], y: n[2], release: release}, true
+}
+
+// csiScroll maps an SGR mouse report (without the ESC [) to a wheel tick.
 func csiScroll(seq string) scrollKind {
-	if !strings.HasPrefix(seq, "<") || !strings.HasSuffix(seq, "M") {
+	m, ok := parseSGRMouse(seq)
+	if !ok || m.release {
 		return scrollNone
 	}
-	btn, err := strconv.Atoi(strings.SplitN(seq[1:], ";", 2)[0])
-	if err != nil {
-		return scrollNone
-	}
-	switch btn &^ (4 | 8 | 16) { // ignore Shift, Alt, Ctrl
+	switch m.btn &^ (4 | 8 | 16) { // ignore Shift, Alt, Ctrl
 	case 64:
 		return wheelUp
 	case 65:
 		return wheelDown
 	}
 	return scrollNone
+}
+
+// csiClick maps an SGR mouse report (without the ESC [) to a left click.
+// Only a plain one counts: with a modifier held or the mouse dragging
+// (bit 32), the terminal may mean something else, such as a selection.
+func csiClick(seq string) *mouseClick {
+	m, ok := parseSGRMouse(seq)
+	if !ok || m.btn != 0 {
+		return nil
+	}
+	return &mouseClick{x: m.x, y: m.y, release: m.release}
 }
 
 const pasteEnd = "\x1b[201~"
@@ -250,6 +302,19 @@ func (d *keyDecoder) csi(seq string, emit func(termEvent)) {
 	case strings.HasPrefix(params, "<"):
 		if k := csiScroll(seq); k != scrollNone {
 			emit(termEvent{scroll: k})
+		} else if c := csiClick(seq); c != nil {
+			emit(termEvent{click: c})
+		}
+		return
+	case final == 'y' && strings.HasPrefix(params, "?") && strings.HasSuffix(params, "$"):
+		f := strings.Split(params[1:len(params)-1], ";")
+		if len(f) != 2 {
+			return
+		}
+		mode, err1 := strconv.Atoi(f[0])
+		value, err2 := strconv.Atoi(f[1])
+		if err1 == nil && err2 == nil {
+			emit(termEvent{mode: &modeReport{mode, value}})
 		}
 		return
 	case strings.HasPrefix(params, "?") || strings.HasPrefix(params, ">"):
