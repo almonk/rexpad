@@ -66,6 +66,21 @@ func toggleByUser(path string, id int, shown Status) error {
 	})
 }
 
+// toggleCollapsedByUser applies a click on the header of the group that
+// groupKeys names key. shown is whether the viewer showed it collapsed: the
+// click means what the user saw, even if the list changed since the last frame.
+func toggleCollapsedByUser(path, key string, shown bool) error {
+	return updateList(path, func(l *List) error {
+		g := l.groupByKey(key)
+		if g == nil {
+			title, _, _ := strings.Cut(key, "\x00")
+			return fmt.Errorf("no group %q", title)
+		}
+		g.Collapsed = !shown
+		return nil
+	})
+}
+
 // extra is how much taller than one line the item is, in points.
 func (it *Item) extra() float64 {
 	if len(it.lines) < 2 {
@@ -78,7 +93,10 @@ type Group struct {
 	Title string `json:"title"`
 	// Progress overrides the ring's fill (0 to 1). Unset, it's the share of done items.
 	Progress *float64 `json:"progress,omitempty"`
-	Items    []Item   `json:"items"`
+	// Collapsed is set when the user clicked the group's header in the
+	// viewer to hide its items. Only the user changes it.
+	Collapsed bool   `json:"collapsed,omitempty"`
+	Items     []Item `json:"items"`
 }
 
 type List struct {
@@ -281,6 +299,28 @@ func (l *List) remove(id int) bool {
 		}
 	}
 	return false
+}
+
+// groupByKey is the group that groupKeys names key, or nil.
+func (l *List) groupByKey(key string) *Group {
+	for g, k := range groupKeys(l) {
+		if k == key {
+			return g
+		}
+	}
+	return nil
+}
+
+// keepCollapsed collapses each group of l that old had collapsed under the
+// same title. Groups that share a title pair up in order.
+func (l *List) keepCollapsed(old *List) {
+	collapsed := map[string]bool{}
+	for g, k := range groupKeys(old) {
+		collapsed[k] = g.Collapsed
+	}
+	for g, k := range groupKeys(l) {
+		g.Collapsed = g.Collapsed || collapsed[k]
+	}
 }
 
 // group finds a group by case-insensitive title prefix, or by 1-based index.

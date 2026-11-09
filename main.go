@@ -251,7 +251,18 @@ func run(args []string) error {
 				l.Groups[gi].Items[ii].By = ""
 			}
 		}
-		if err := replace(l); err != nil {
+		// The user's collapsed groups stay collapsed. set also replaces a
+		// list that cannot be read, so it only warns then.
+		err = withListLock(path, func() error {
+			old, err := loadList(path)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "rexpad: cannot read the old list, so no group stays collapsed:", err)
+			} else {
+				l.keepCollapsed(old)
+			}
+			return saveList(path, l)
+		})
+		if err != nil {
 			return err
 		}
 		fmt.Print(l.markdown(true))

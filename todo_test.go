@@ -2068,3 +2068,128 @@ func TestWaitWarnsWithNoViewerOpen(t *testing.T) {
 		t.Errorf("wait with no pane open warned %q", stderr)
 	}
 }
+
+// keyOf is the key that groupKeys gives group gi of l.
+func keyOf(l *List, gi int) string { return groupKeys(l)[&l.Groups[gi]] }
+
+func TestCollapsedIsStoredButNotInMarkdown(t *testing.T) {
+	const md = "# A\n- [ ] a {#1}\n\n# B\n- [ ] b {#2}\n"
+	l, _ := parseMarkdown(md)
+	l.Groups[0].Collapsed = true
+	data, err := json.Marshal(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), `"collapsed":true`); n != 1 {
+		t.Errorf("JSON has %d collapsed fields, want 1 (left out when false): %s", n, data)
+	}
+	var back List
+	if err := json.Unmarshal(data, &back); err != nil || !back.Groups[0].Collapsed || back.Groups[1].Collapsed {
+		t.Errorf("round trip lost the state: %+v, %v", back.Groups, err)
+	}
+	if got := l.markdown(true); got != md {
+		t.Errorf("markdown = %q, want %q", got, md)
+	}
+}
+
+func TestToggleCollapsedByUser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "l.json")
+	saveMarkdown(t, path, "# A\n- [~] a {#1}\n# A\n- [ ] b {#2}\n")
+	key := keyOf(mustLoad(t, path), 1) // the second group titled A
+	if err := toggleCollapsedByUser(path, key, false); err != nil {
+		t.Fatal(err)
+	}
+	l := mustLoad(t, path)
+	if l.Groups[0].Collapsed || !l.Groups[1].Collapsed {
+		t.Fatalf("collapsed = %v, %v; want only the second group", l.Groups[0].Collapsed, l.Groups[1].Collapsed)
+	}
+	if it := l.find(1); it.Status != StatusActive || it.By != "" {
+		t.Errorf("collapsing changed an item: %+v", *it)
+	}
+	// A click means what the user saw: a second click from a stale frame
+	// that still showed the group open keeps it collapsed.
+	if err := toggleCollapsedByUser(path, key, false); err != nil {
+		t.Fatal(err)
+	}
+	if !mustLoad(t, path).Groups[1].Collapsed {
+		t.Error("a click on a group shown open expanded it")
+	}
+	if err := toggleCollapsedByUser(path, key, true); err != nil {
+		t.Fatal(err)
+	}
+	if mustLoad(t, path).Groups[1].Collapsed {
+		t.Error("a click on a group shown collapsed did not expand it")
+	}
+	if err := toggleCollapsedByUser(path, "Gone\x000", false); err == nil {
+		t.Error("a click on a group that is gone should fail")
+	}
+}
+
+func TestSetKeepsCollapsedGroups(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "setcollapse")
+	path := listPath("setcollapse")
+	set := func(input string, args ...string) *List {
+		t.Helper()
+		withStdin(t, input, func() { captureStdout(t, func() { mustRun(t, append([]string{"set"}, args...)...) }) })
+		return mustLoad(t, path)
+	}
+	set("# Build\n- [ ] a\n# Ship\n- [ ] b\n")
+	if err := toggleCollapsedByUser(path, "Build\x000", false); err != nil {
+		t.Fatal(err)
+	}
+	l := set("# Release\n- [ ] c\n# Build\n- [ ] a2\n")
+	if !l.Groups[1].Collapsed || l.Groups[0].Collapsed {
+		t.Errorf("after set: Release %v, Build %v; want only Build collapsed", l.Groups[0].Collapsed, l.Groups[1].Collapsed)
+	}
+	if l = set("# Built\n- [ ] a\n"); l.Groups[0].Collapsed {
+		t.Error("a renamed group kept the collapsed state")
+	}
+	l = set(`{"groups":[{"title":"Docs","collapsed":true,"items":[{"text":"d"}]}]}`, "--json")
+	if !l.Groups[0].Collapsed {
+		t.Error("set --json dropped a collapsed field it was given")
+	}
+	if got := captureStdout(t, func() { mustRun(t, "get") }); strings.Contains(got, "collapsed") {
+		t.Errorf("get shows the state: %q", got)
+	}
+}
+
+func TestSetReplacesAnUnreadableList(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "broken")
+	path := listPath("broken")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stderr := capture(t, &os.Stderr, func() {
+		withStdin(t, "# G\n- [ ] a\n", func() { captureStdout(t, func() { mustRun(t, "set") }) })
+	})
+	if l := mustLoad(t, path); len(l.Groups) != 1 || l.Groups[0].Title != "G" {
+		t.Errorf("set did not replace the broken list: %+v", l.Groups)
+	}
+	if !strings.Contains(stderr, "collapsed") {
+		t.Errorf("set gave no warning that it could not keep collapsed groups: %q", stderr)
+	}
+}
+
+func TestCommandsKeepGroupsCollapsed(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "keepcollapse")
+	path := listPath("keepcollapse")
+	saveMarkdown(t, path, "# Build\n- [ ] a {#1}\n- [ ] b {#2}\n# Ship\n- [ ] c {#3}\n")
+	if err := toggleCollapsedByUser(path, "Build\x000", false); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, "start", "1")
+	mustRun(t, "done", "2")
+	mustRun(t, "edit", "1", "a, edited")
+	captureStdout(t, func() { mustRun(t, "add", "-g", "Build", "d") })
+	mustRun(t, "group", "Build") // moves it last
+	l := mustLoad(t, path)
+	if g := l.group("Build"); g == nil || !g.Collapsed {
+		t.Errorf("an agent command expanded the group: %+v", g)
+	}
+}
