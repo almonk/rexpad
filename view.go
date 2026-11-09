@@ -21,8 +21,19 @@ import (
 )
 
 type viewOptions struct {
-	theme string  // terminal (follow the terminal's colors), light, or dark
-	scale float64 // device pixels per point; 0 picks from the cell size
+	theme       string  // terminal (follow the terminal's colors), light, or dark
+	scale       float64 // device pixels per point; 0 picks from the cell size
+	returnFocus string  // the Rex pane to give focus to after a click, if any
+}
+
+// clickedItem is the item whose box a click at pixel c is on, in the frame
+// drawn at scale and scrolled offsetPx down, with the rows where geo puts
+// them. The find bar covers the pane from viewPx down.
+func clickedItem(l *List, geo []rowGeo, c mouseClick, scale float64, offsetPx, viewPx int) *Item {
+	if c.y >= viewPx {
+		return nil
+	}
+	return hitItem(l, geo, float64(c.x)/scale, float64(c.y+offsetPx)/scale)
 }
 
 type winSize struct{ rows, cols, xpix, ypix int }
@@ -1109,6 +1120,38 @@ func runView(name string, opt viewOptions) error {
 		return false
 	}
 
+	// handleClick toggles an item when the button goes down and comes up on
+	// its box, so pressing on one box and letting go on another does
+	// nothing. The click moved focus into this pane; unless find is in use
+	// here, focus goes back to the agent's pane.
+	pressed := 0 // the item the button went down on
+	handleClick := func(c mouseClick) {
+		cellH := lastSize.ypix / lastSize.rows
+		it := clickedItem(list, geo, c, scale, int(math.Round(shown*scale)), cellH*listRows)
+		id := 0
+		if it != nil {
+			id = it.ID
+		}
+		if !c.release {
+			pressed = id
+			return
+		}
+		if id == 0 || id != pressed {
+			pressed = 0
+			return
+		}
+		pressed = 0
+		if err := toggleByUser(path, id, it.Status); err != nil {
+			// The pane has no room for a message: the bell says the
+			// click didn't take, and the box shows it unchanged.
+			fmt.Fprint(w, "\a")
+		}
+		draw(false)
+		if opt.returnFocus != "" && !find.open {
+			go returnFocus(opt.returnFocus)
+		}
+	}
+
 	draw(true)
 	tick := time.NewTicker(150 * time.Millisecond)
 	defer tick.Stop()
@@ -1159,6 +1202,8 @@ func runView(name string, opt viewOptions) error {
 				}
 			case ev.scroll != scrollNone:
 				scrollBy(ev.scroll)
+			case ev.click != nil:
+				handleClick(*ev.click)
 			case ev.paste != "":
 				if find.input {
 					find.edit.paste(ev.paste)

@@ -37,8 +37,8 @@ var viewerSettings = []string{
 	"REXPAD_FONT", "REXPAD_FONT_BOLD", "REXPAD_FONT_SIZE", "REXPAD_TEXT_GAMMA", "REXPAD_SCALE", "XDG_STATE_HOME",
 }
 
-func viewerCommand(self, name, theme string) []string {
-	view := []string{self, "view", "--list", name, "--theme", theme}
+func viewerCommand(self, name string, opt showOptions) []string {
+	view := viewArgs(self, name, opt)
 	var settings []string
 	for _, key := range viewerSettings {
 		if value := os.Getenv(key); value != "" {
@@ -75,7 +75,7 @@ func showPane(name string, opt showOptions) error {
 		args = append(args, "-b", b)
 	}
 	args = append(args, "--")
-	args = append(args, viewerCommand(self, name, opt.theme)...)
+	args = append(args, viewerCommand(self, name, opt)...)
 	cmd := exec.Command("rex", args...)
 	cmd.Stderr = os.Stderr
 	outBytes, err := cmd.Output()
@@ -100,6 +100,22 @@ func showPane(name string, opt showOptions) error {
 	}
 	fmt.Println(id)
 	return nil
+}
+
+// viewArgs is the viewer's command line. A click in the viewer moves focus
+// into its pane, so the viewer gets the agent's pane to give focus back to.
+func viewArgs(self, name string, opt showOptions) []string {
+	args := []string{self, "view", "--list", name, "--theme", opt.theme}
+	if b := os.Getenv("REX_BLOCK"); b != "" {
+		args = append(args, "--return-focus", b)
+	}
+	return args
+}
+
+// returnFocus gives focus to the Rex pane block. If it fails, focus stays
+// in the viewer, where the click put it, so there is nothing to undo.
+func returnFocus(block string) {
+	_ = exec.Command("rex", "block", "focus", block).Run()
 }
 
 func hidePane(name string) error {

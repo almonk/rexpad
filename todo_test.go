@@ -1188,7 +1188,8 @@ func TestViewerCommandCarriesCallerSettings(t *testing.T) {
 	t.Setenv("REXPAD_FONT_BOLD", "")
 	t.Setenv("REXPAD_SCALE", "2")
 	t.Setenv("XDG_STATE_HOME", "/state")
-	got := viewerCommand("/bin/rexpad", "l", "dark")
+	t.Setenv("REX_BLOCK", "")
+	got := viewerCommand("/bin/rexpad", "l", showOptions{theme: "dark"})
 	want := []string{"/usr/bin/env", "REXPAD_FONT=/fonts/Mono Regular.otf", "REXPAD_SCALE=2", "XDG_STATE_HOME=/state",
 		"/bin/rexpad", "view", "--list", "l", "--theme", "dark"}
 	if !slices.Equal(got, want) {
@@ -1200,7 +1201,8 @@ func TestViewerCommandWithoutSettings(t *testing.T) {
 	for _, k := range viewerSettings {
 		t.Setenv(k, "")
 	}
-	got := viewerCommand("/bin/rexpad", "l", "terminal")
+	t.Setenv("REX_BLOCK", "")
+	got := viewerCommand("/bin/rexpad", "l", showOptions{theme: "terminal"})
 	want := []string{"/bin/rexpad", "view", "--list", "l", "--theme", "terminal"}
 	if !slices.Equal(got, want) {
 		t.Errorf("viewerCommand = %q\nwant %q", got, want)
@@ -1227,7 +1229,7 @@ func TestShowPaneStartsViewerWithCallerSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	self, _ := os.Executable()
-	want := strings.Join(viewerCommand(self, "l", "dark"), "\n")
+	want := strings.Join(viewerCommand(self, "l", showOptions{split: "right", ratio: 30, theme: "dark"}), "\n")
 	if !strings.HasSuffix(strings.TrimSpace(string(got)), "\n--\n"+want) {
 		t.Errorf("rex split argv:\n%s\nwant it to end with:\n--\n%s", got, want)
 	}
@@ -1930,5 +1932,39 @@ func TestHitItem(t *testing.T) {
 	geo[4].open = 0.5
 	if got := id(hitItem(l, geo, boxX, geo[4].center)); got != 0 {
 		t.Errorf("hit item %d while it was still folding", got)
+	}
+}
+
+func TestClickedItemUsesTheFrameOnScreen(t *testing.T) {
+	l, _ := parseMarkdown("- [ ] a {#1}\n- [ ] b {#2}\n- [ ] c {#3}\n")
+	rows, _ := layout(l)
+	const scale = 2.0
+	boxPx := int((marginLeft + boxCenter) * scale)
+	at := func(id int) int { return int(rows[id-1].center * scale) }
+	id := func(it *Item) int {
+		if it == nil {
+			return 0
+		}
+		return it.ID
+	}
+	if got := id(clickedItem(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, 0, 1000)); got != 2 {
+		t.Errorf("unscrolled: hit %d, want 2", got)
+	}
+	// Scrolled down one row: item 3 is drawn where item 2 was.
+	if got := id(clickedItem(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, int(itemPitch*scale), 1000)); got != 3 {
+		t.Errorf("scrolled: hit %d, want 3", got)
+	}
+	// The find bar covers the pane below viewPx.
+	if got := id(clickedItem(l, nil, mouseClick{x: boxPx, y: at(3)}, scale, 0, at(3)-10)); got != 0 {
+		t.Errorf("a click on the find bar hit item %d", got)
+	}
+}
+
+func TestViewArgs(t *testing.T) {
+	t.Setenv("REX_BLOCK", "block:agent")
+	got := viewArgs("/bin/rexpad", "mylist", showOptions{theme: "dark"})
+	want := []string{"/bin/rexpad", "view", "--list", "mylist", "--theme", "dark", "--return-focus", "block:agent"}
+	if !slices.Equal(got, want) {
+		t.Errorf("viewArgs = %q, want %q", got, want)
 	}
 }
