@@ -45,6 +45,15 @@ const (
 	boxCenter = 8.5 // checkbox center from the content's left edge
 
 	activeInset = 6.0 // active row highlight extends this far left of the content edge
+
+	// The disclosure arrow at the right of a group's header: a chevron
+	// arrowArm either side of its center and arrowDepth from its arms to
+	// its tip, centered arrowInset left of the content's right edge.
+	arrowInset  = 6.0
+	arrowArm    = 3.5
+	arrowDepth  = 1.75
+	arrowStroke = 0.75                      // half the line's width
+	arrowRoom   = arrowInset + arrowArm + 8 // what a title leaves free for it
 )
 
 type palette struct {
@@ -483,7 +492,8 @@ func (r *renderer) row(img *image.RGBA, i int, rw row, left, right, cy float64) 
 			r.groupIcon(img, edge+iconRadius*show, cy, rw.group.progress(), show)
 		}
 		tx := edge + 0.25 + show*(left+titleX-edge-0.25)
-		r.textMarked(img, rw.group.Title, tx, cy+baselineOffset, true, r.pal.title, right-tx, r.marks[i])
+		r.textMarked(img, rw.group.Title, tx, cy+baselineOffset, true, r.pal.title, max(1, right-arrowRoom-tx), r.marks[i])
+		r.disclosure(img, right-arrowInset, cy, rw.group.Collapsed)
 		r.fillRect(img, left, cy+dividerOffset, right, cy+dividerOffset+1, r.pal.divider)
 	case rowItem:
 		r.item(img, rw.item, left, right, cy, r.marks[i])
@@ -805,9 +815,26 @@ func (r *renderer) iconShow(g *Group) float64 {
 }
 
 func (r *renderer) checkmark(img *image.RGBA, bx, by float64) {
-	// A stroked polyline as a polygon: short leg then long leg.
-	pts := [][2]float64{{bx + 3.0, by + 6.2}, {bx + 5.1, by + 8.3}, {bx + 9.0, by + 3.8}}
-	const w = 0.75 // half stroke width
+	// Short leg then long leg.
+	r.stroke(img, [][2]float64{{bx + 3.0, by + 6.2}, {bx + 5.1, by + 8.3}, {bx + 9.0, by + 3.8}}, 0.75, r.pal.check)
+}
+
+// disclosure draws a group header's arrow centered at (cx, cy): pointing
+// down while the group is open, and right while it is collapsed.
+func (r *renderer) disclosure(img *image.RGBA, cx, cy float64, collapsed bool) {
+	pts := [][2]float64{{-arrowArm, -arrowDepth}, {0, arrowDepth}, {arrowArm, -arrowDepth}}
+	for i, p := range pts {
+		if collapsed {
+			p = [2]float64{p[1], -p[0]} // a quarter turn, from down to right
+		}
+		pts[i] = [2]float64{cx + p[0], cy + p[1]}
+	}
+	r.stroke(img, pts, arrowStroke, r.pal.doneText)
+}
+
+// stroke draws the polyline pts as a line that reaches w points either side
+// of it, each segment a polygon.
+func (r *renderer) stroke(img *image.RGBA, pts [][2]float64, w float64, col color.RGBA) {
 	p := r.path(img)
 	for i := 0; i+1 < len(pts); i++ {
 		a, b := pts[i], pts[i+1]
@@ -820,5 +847,5 @@ func (r *renderer) checkmark(img *image.RGBA, bx, by float64) {
 			{b[0] + nx + ex, b[1] + ny + ey}, {a[0] + nx - ex, a[1] + ny - ey},
 		})
 	}
-	p.fill(r.pal.check)
+	p.fill(col)
 }

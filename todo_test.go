@@ -2449,3 +2449,49 @@ func TestClickTrackerTellsHeadersFromBoxes(t *testing.T) {
 		}
 	}
 }
+
+func TestHeaderArrowShowsState(t *testing.T) {
+	fonts, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const scale, widthPt = 2.0, 400.0
+	l := collapsedList(t, "# A\n- [ ] a {#1}\n")
+	rows, _ := layout(l)
+	ax, cy := widthPt-marginRight-arrowInset, rows[0].center
+	painted := func(img *image.RGBA, x, y float64) bool {
+		return img.RGBAAt(int(math.Floor((ax+x)*scale)), int(math.Floor((cy+y)*scale))) != lightPalette.bg
+	}
+	// On the left arm of a down arrow, and on the top arm of a right arrow.
+	downArm, rightArm := [2]float64{-3, -1.25}, [2]float64{-1.25, -3}
+	for _, collapsed := range []bool{false, true} {
+		l.Groups[0].Collapsed = collapsed
+		img := (&renderer{fonts: fonts, scale: scale, pal: lightPalette}).Render(l, int(widthPt*scale), 200, 0)
+		if got := painted(img, downArm[0], downArm[1]); got == collapsed {
+			t.Errorf("collapsed %v: down arrow's arm drawn %v", collapsed, got)
+		}
+		if got := painted(img, rightArm[0], rightArm[1]); got != collapsed {
+			t.Errorf("collapsed %v: right arrow's arm drawn %v", collapsed, got)
+		}
+	}
+}
+
+func TestLongTitleLeavesRoomForTheArrow(t *testing.T) {
+	fonts, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const scale, widthPt = 2.0, 300.0
+	l, _ := parseMarkdown("# " + strings.Repeat("Wide title ", 40) + "\n- [ ] a\n")
+	rows, _ := layout(l)
+	img := (&renderer{fonts: fonts, scale: scale, pal: lightPalette}).Render(l, int(widthPt*scale), 200, 0)
+	arrowLeft := widthPt - marginRight - arrowInset - arrowArm - 1
+	cy := rows[0].center
+	for x := (arrowLeft - 4) * scale; x < arrowLeft*scale; x++ {
+		for y := (cy - 9) * scale; y < (cy+9)*scale; y++ {
+			if c := img.RGBAAt(int(x), int(y)); c != lightPalette.bg {
+				t.Fatalf("pixel %v at (%v, %v) in the gap before the arrow: the title runs into it", c, x, y)
+			}
+		}
+	}
+}
