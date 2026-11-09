@@ -45,6 +45,12 @@ go install github.com/almonk/rexpad@latest
 This puts `rexpad` in `$(go env GOPATH)/bin` (usually `~/go/bin`). Make sure
 that directory is on your `PATH`.
 
+Or with Nix:
+
+```bash
+nix run github:almonk/rexpad
+```
+
 Or build from a clone:
 
 ```bash
