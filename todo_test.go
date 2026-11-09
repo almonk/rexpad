@@ -2248,6 +2248,48 @@ func TestCollapseAndExpandCommands(t *testing.T) {
 	}
 }
 
+func TestFoldedMatchIsAnItemInACollapsedGroup(t *testing.T) {
+	l := collapsedList(t, "# Build\n- [ ] alpha {#1}\n# Ship\n- [ ] beta {#2}\n", 0)
+	var f findState
+	for _, c := range []struct {
+		query string
+		want  int
+	}{
+		{"alpha", 1}, // an item in the collapsed group
+		{"beta", 0},  // an item in an open group
+		{"build", 0}, // the collapsed group's header
+		{"zzz", 0},   // no match
+	} {
+		f.setQuery(l, c.query)
+		if got := f.foldedMatch(l); got != c.want {
+			t.Errorf("query %q: foldedMatch = %d, want %d", c.query, got, c.want)
+		}
+	}
+}
+
+func TestExpandGroupOf(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "l.json")
+	saveMarkdown(t, path, "# A\n- [~] a {#1}\n# B\n- [ ] b {#2}\n")
+	for _, i := range []int{0, 1} {
+		if err := toggleCollapsedByUser(path, keyOf(mustLoad(t, path), i), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := expandGroupOf(path, 2); err != nil {
+		t.Fatal(err)
+	}
+	l := mustLoad(t, path)
+	if !l.Groups[0].Collapsed || l.Groups[1].Collapsed {
+		t.Errorf("collapsed = %v, %v; want only A", l.Groups[0].Collapsed, l.Groups[1].Collapsed)
+	}
+	if it := l.find(2); it.Status != StatusPending || it.By != "" {
+		t.Errorf("expanding changed the item: %+v", *it)
+	}
+	if err := expandGroupOf(path, 99); err == nil {
+		t.Error("expanding the group of a missing item should fail")
+	}
+}
+
 // collapsedList parses md and collapses the groups at the given indices.
 func collapsedList(t *testing.T, md string, groups ...int) *List {
 	t.Helper()

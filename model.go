@@ -81,6 +81,19 @@ func toggleCollapsedByUser(path, key string, shown bool) error {
 	})
 }
 
+// expandGroupOf expands the group that holds item id, so that the item
+// shows.
+func expandGroupOf(path string, id int) error {
+	return updateList(path, func(l *List) error {
+		g := l.groupOf(id)
+		if g == nil {
+			return fmt.Errorf("no item %d", id)
+		}
+		g.Collapsed = false
+		return nil
+	})
+}
+
 // extra is how much taller than one line the item is, in points.
 func (it *Item) extra() float64 {
 	if len(it.lines) < 2 {
@@ -287,6 +300,17 @@ func (l *List) find(id int) *Item {
 		for ii := range l.Groups[gi].Items {
 			if l.Groups[gi].Items[ii].ID == id {
 				return &l.Groups[gi].Items[ii]
+			}
+		}
+	}
+	return nil
+}
+
+func (l *List) groupOf(id int) *Group {
+	for gi := range l.Groups {
+		for _, it := range l.Groups[gi].Items {
+			if it.ID == id {
+				return &l.Groups[gi]
 			}
 		}
 	}

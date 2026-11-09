@@ -231,6 +231,19 @@ func (f *findState) current() (rowMatch, bool) {
 	return rowMatch{}, false
 }
 
+// foldedMatch is the ID of the current match's item when the item's group
+// is collapsed, so the item hides once find closes; otherwise 0.
+func (f *findState) foldedMatch(l *List) int {
+	m, ok := f.current()
+	if !ok || m.itemID == 0 {
+		return 0
+	}
+	if g := l.groupOf(m.itemID); g == nil || !g.folded() {
+		return 0
+	}
+	return m.itemID
+}
+
 // spans groups the matches by row for the renderer.
 func (f *findState) spans() map[int][]span {
 	if f == nil || len(f.matches) == 0 {

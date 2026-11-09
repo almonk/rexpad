@@ -1046,12 +1046,18 @@ func runView(name string, opt viewOptions) error {
 		scrollTo(math.Min(c-viewH/3, math.Max(0, geoToH-viewH)))
 	}
 	// closeFind folds the whole list back open and keeps the match that was
-	// current in view, so Esc lands you on what you found, in context.
+	// current in view, so Esc lands you on what you found, in context. A
+	// match in a collapsed group would fold away, so its group expands.
 	closeFind := func() {
 		m, ok := find.current()
+		if id := find.foldedMatch(list); id != 0 {
+			if err := expandGroupOf(path, id); err != nil {
+				fmt.Fprint(w, "\a") // the view lands on the group's header instead
+			}
+		}
 		find = findState{}
 		refold()
-		draw(true) // the bar's rows go back to the list first
+		draw(true) // the bar's rows go back to the list first, and the expanded group loads
 		if ok {
 			scrollTo(math.Max(0, math.Min(geoTo[m.row].center-viewH/3, geoToH-viewH)))
 		} else {
