@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -42,7 +43,14 @@ func checkWatched(l *List, ids []int) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("the list has no item %s", strings.Trim(fmt.Sprint(ids), "[]"))
+	if len(ids) == 1 {
+		return fmt.Errorf("the list has no item %d", ids[0])
+	}
+	names := make([]string, len(ids))
+	for i, id := range ids {
+		names[i] = strconv.Itoa(id)
+	}
+	return fmt.Errorf("the list has none of the items %s", strings.Join(names, ", "))
 }
 
 // userChanges is the part of l that has the user's mark: the items among

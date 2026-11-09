@@ -423,6 +423,9 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		if _, open := viewerOpen(name); !open {
+			fmt.Fprintln(os.Stderr, "rexpad: no viewer pane is open for this list, so the user has no box to click; run rexpad show")
+		}
 		l, err := waitForUser(path, ns, waitPoll)
 		if err != nil {
 			return err

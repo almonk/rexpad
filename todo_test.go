@@ -1763,15 +1763,18 @@ func saveMarkdown(t *testing.T, path, md string) {
 }
 
 // captureStdout runs fn and returns what it printed.
-func captureStdout(t *testing.T, fn func()) string {
+func captureStdout(t *testing.T, fn func()) string { return capture(t, &os.Stdout, fn) }
+
+// capture runs fn and returns what it wrote to *f, such as os.Stderr.
+func capture(t *testing.T, f **os.File, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := os.Stdout
-	os.Stdout = w
-	defer func() { os.Stdout = old }()
+	old := *f
+	*f = w
+	defer func() { *f = old }()
 	fn()
 	w.Close()
 	out, _ := io.ReadAll(r)
@@ -2038,5 +2041,29 @@ func TestDecodeModeReports(t *testing.T) {
 	}
 	if !(modeReport{1016, 1}).on() || !(modeReport{1016, 3}).on() || (modeReport{1016, 0}).on() || (modeReport{1016, 2}).on() {
 		t.Error("on() should be true only for set (1) and permanently set (3)")
+	}
+}
+
+func TestWaitErrorsNameTheMissingItems(t *testing.T) {
+	l, _ := parseMarkdown("- [ ] one {#1}\n")
+	if err := checkWatched(l, []int{9}); err == nil || err.Error() != "the list has no item 9" {
+		t.Errorf("one ID: %v", err)
+	}
+	if err := checkWatched(l, []int{8, 9}); err == nil || err.Error() != "the list has none of the items 8, 9" {
+		t.Errorf("two IDs: %v", err)
+	}
+}
+
+func TestWaitWarnsWithNoViewerOpen(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "nopane")
+	path := listPath("nopane")
+	saveMarkdown(t, path, "- [ ] one {#1}\n")
+	if err := toggleByUser(path, 1, StatusPending); err != nil {
+		t.Fatal(err)
+	}
+	stderr := capture(t, &os.Stderr, func() { captureStdout(t, func() { mustRun(t, "wait") }) })
+	if !strings.Contains(stderr, "no viewer pane") {
+		t.Errorf("wait with no pane open warned %q", stderr)
 	}
 }
