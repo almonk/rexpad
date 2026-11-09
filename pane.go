@@ -52,9 +52,10 @@ func viewerCommand(self, name string, opt showOptions) []string {
 }
 
 type showOptions struct {
-	split string
-	ratio int
-	theme string
+	split   string
+	ratio   int
+	theme   string
+	noClick bool // a read-only viewer: clicks don't toggle items
 }
 
 func showPane(name string, opt showOptions) error {
@@ -108,6 +109,9 @@ func viewArgs(self, name string, opt showOptions) []string {
 	args := []string{self, "view", "--list", name, "--theme", opt.theme}
 	if b := os.Getenv("REX_BLOCK"); b != "" {
 		args = append(args, "--return-focus", b)
+	}
+	if opt.noClick {
+		args = append(args, "--no-click")
 	}
 	return args
 }

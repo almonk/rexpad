@@ -140,6 +140,7 @@ func run(args []string) error {
 		below := fs.Bool("below", false, "split below instead of right")
 		ratio := fs.Int("ratio", 30, "pane share of the split, percent")
 		theme := fs.String("theme", "terminal", "terminal (follow the Rex theme), light, or dark")
+		noClick := fs.Bool("no-click", false, "clicks don't toggle items")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
@@ -154,7 +155,7 @@ func run(args []string) error {
 			return err
 		}
 		printFontWarnings(fonts)
-		return showPane(name, showOptions{split: split, ratio: *ratio, theme: *theme})
+		return showPane(name, showOptions{split: split, ratio: *ratio, theme: *theme, noClick: *noClick})
 
 	case "hide":
 		return hidePane(name)
@@ -164,10 +165,11 @@ func run(args []string) error {
 		theme := fs.String("theme", "terminal", "terminal (follow the Rex theme), light, or dark")
 		scale := fs.Float64("scale", 0, "device pixels per point (0: from the cell size)")
 		focus := fs.String("return-focus", "", "Rex pane to give focus to after a click")
+		noClick := fs.Bool("no-click", false, "clicks don't toggle items")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
-		return runView(name, viewOptions{theme: *theme, scale: *scale, returnFocus: *focus})
+		return runView(name, viewOptions{theme: *theme, scale: *scale, returnFocus: *focus, noClick: *noClick})
 
 	case "render":
 		fs := flag.NewFlagSet("render", flag.ContinueOnError)

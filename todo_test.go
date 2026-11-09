@@ -1967,4 +1967,10 @@ func TestViewArgs(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("viewArgs = %q, want %q", got, want)
 	}
+	t.Setenv("REX_BLOCK", "")
+	got = viewArgs("/bin/rexpad", "mylist", showOptions{theme: "dark", noClick: true})
+	want = []string{"/bin/rexpad", "view", "--list", "mylist", "--theme", "dark", "--no-click"}
+	if !slices.Equal(got, want) {
+		t.Errorf("viewArgs = %q, want %q", got, want)
+	}
 }

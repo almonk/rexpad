@@ -24,6 +24,7 @@ type viewOptions struct {
 	theme       string  // terminal (follow the terminal's colors), light, or dark
 	scale       float64 // device pixels per point; 0 picks from the cell size
 	returnFocus string  // the Rex pane to give focus to after a click, if any
+	noClick     bool    // clicks don't toggle items
 }
 
 // clickedItem is the item whose box a click at pixel c is on, in the frame
@@ -1202,7 +1203,7 @@ func runView(name string, opt viewOptions) error {
 				}
 			case ev.scroll != scrollNone:
 				scrollBy(ev.scroll)
-			case ev.click != nil:
+			case ev.click != nil && !opt.noClick:
 				handleClick(*ev.click)
 			case ev.paste != "":
 				if find.input {
