@@ -1864,3 +1864,19 @@ func TestWaitCommandPrintsTheGetFormat(t *testing.T) {
 		t.Errorf("wait printed %q", got)
 	}
 }
+
+func TestDecodeClicks(t *testing.T) {
+	var got []mouseClick
+	var d keyDecoder
+	d.feed([]byte("\x1b[I\x1b[<0;122;155M\x1b[<0;122;155m\x1b[<64;5;5M\x1b[<1;3;4M\x1b[<4;3;4M\x1b[<32;3;4M"), func(ev termEvent) {
+		if ev.click != nil {
+			got = append(got, *ev.click)
+		}
+	})
+	// Only plain left-button presses and releases: not the wheel, the
+	// middle button, Shift-click, or a drag.
+	want := []mouseClick{{x: 122, y: 155}, {x: 122, y: 155, release: true}}
+	if !slices.Equal(got, want) {
+		t.Errorf("clicks = %+v, want %+v", got, want)
+	}
+}

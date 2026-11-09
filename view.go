@@ -247,13 +247,15 @@ func runView(name string, opt viewOptions) error {
 
 	w := bufio.NewWriterSize(out, 1<<16)
 	// Alternate screen, hidden cursor, color-scheme change reports (2031),
-	// mouse reports in SGR form (1000, 1006) so the wheel scrolls the list,
-	// bracketed paste (2004), and the kitty keyboard protocol's disambiguate
-	// flag (> 1 u) so Command and Option keys reach the find field.
-	fmt.Fprint(w, "\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J\x1b[?2031h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[>1u")
+	// mouse reports in SGR form (1000, 1006) so the wheel scrolls the list
+	// and clicks reach the checkboxes, with positions in pixels (1016) so a
+	// click lands on the right row, bracketed paste (2004), and the kitty
+	// keyboard protocol's disambiguate flag (> 1 u) so Command and Option
+	// keys reach the find field.
+	fmt.Fprint(w, "\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J\x1b[?2031h\x1b[?1000h\x1b[?1006h\x1b[?1016h\x1b[?2004h\x1b[>1u")
 	w.Flush()
 	defer func() {
-		fmt.Fprint(w, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[<u\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?2031l\x1b[?25h\x1b[?1049l")
+		fmt.Fprint(w, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[<u\x1b[?2004l\x1b[?1016l\x1b[?1006l\x1b[?1000l\x1b[?2031l\x1b[?25h\x1b[?1049l")
 		w.Flush()
 	}()
 
