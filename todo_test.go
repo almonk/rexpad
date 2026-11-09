@@ -1645,17 +1645,14 @@ func TestConcurrentAddsKeepEveryItem(t *testing.T) {
 func TestToggleByUser(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	path := listPath("toggle")
-	l, _ := parseMarkdown("- [ ] pending {#1}\n- [~] active {#2}\n- [x] done {#3}\n")
-	if err := saveList(path, l); err != nil {
-		t.Fatal(err)
-	}
+	saveMarkdown(t, path, "- [ ] pending {#1}\n- [~] active {#2}\n- [x] done {#3}\n")
 	want := map[int]Status{1: StatusDone, 2: StatusDone, 3: StatusPending}
 	for id, shown := range map[int]Status{1: StatusPending, 2: StatusActive, 3: StatusDone} {
 		if err := toggleByUser(path, id, shown); err != nil {
 			t.Fatal(err)
 		}
 	}
-	l, _ = loadList(path)
+	l := mustLoad(t, path)
 	for id, st := range want {
 		if it := l.find(id); it.Status != st || it.By != byUser {
 			t.Errorf("item %d = %s by %q, want %s by %q", id, it.Status, it.By, st, byUser)
@@ -1725,10 +1722,7 @@ func TestGetShowsTheUserMarkOnlyInJSON(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("REXPAD_LIST", "get")
 	path := listPath("get")
-	l, _ := parseMarkdown("- [ ] one {#1}\n")
-	if err := saveList(path, l); err != nil {
-		t.Fatal(err)
-	}
+	saveMarkdown(t, path, "- [ ] one {#1}\n")
 	if err := toggleByUser(path, 1, StatusPending); err != nil {
 		t.Fatal(err)
 	}
@@ -1754,6 +1748,18 @@ func mustLoad(t *testing.T, path string) *List {
 		t.Fatal(err)
 	}
 	return l
+}
+
+// saveMarkdown writes the checklist md as the list at path.
+func saveMarkdown(t *testing.T, path, md string) {
+	t.Helper()
+	l, err := parseMarkdown(md)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveList(path, l); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // captureStdout runs fn and returns what it printed.
@@ -1790,10 +1796,7 @@ func withStdin(t *testing.T, input string, fn func()) {
 func TestWaitForUserReturnsMarkedItems(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	path := listPath("wait")
-	l, _ := parseMarkdown("# Mine\n- [ ] agent's {#1}\n# Yours\n- [ ] log in {#2}\n- [ ] approve {#3}\n")
-	if err := saveList(path, l); err != nil {
-		t.Fatal(err)
-	}
+	saveMarkdown(t, path, "# Mine\n- [ ] agent's {#1}\n# Yours\n- [ ] log in {#2}\n- [ ] approve {#3}\n")
 	// A click before the wait starts still counts: an agent can't start
 	// waiting at the same instant it adds the step.
 	if err := toggleByUser(path, 2, StatusPending); err != nil {
@@ -1828,10 +1831,7 @@ func TestWaitForUserReturnsMarkedItems(t *testing.T) {
 func TestWaitForUserFailsOnMissingItems(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	path := listPath("waitgone")
-	l, _ := parseMarkdown("- [ ] one {#1}\n- [ ] two {#2}\n")
-	if err := saveList(path, l); err != nil {
-		t.Fatal(err)
-	}
+	saveMarkdown(t, path, "- [ ] one {#1}\n- [ ] two {#2}\n")
 	if _, err := waitForUser(path, []int{9}, time.Millisecond); err == nil {
 		t.Error("wait on an item that doesn't exist should fail")
 	}
@@ -1855,10 +1855,7 @@ func TestWaitCommandPrintsTheGetFormat(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("REXPAD_LIST", "waitcmd")
 	path := listPath("waitcmd")
-	l, _ := parseMarkdown("- [x] one {#1}\n")
-	if err := saveList(path, l); err != nil {
-		t.Fatal(err)
-	}
+	saveMarkdown(t, path, "- [x] one {#1}\n")
 	if err := toggleByUser(path, 1, StatusDone); err != nil {
 		t.Fatal(err)
 	}
