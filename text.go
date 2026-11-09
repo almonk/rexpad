@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"image/draw"
 	"math"
+	"unicode/utf8"
 
 	"github.com/go-text/typesetting/di"
 	"github.com/go-text/typesetting/language"
@@ -14,16 +15,18 @@ import (
 	"golang.org/x/image/vector"
 )
 
-// A textRun is a string shaped onto one line: each glyph with its pen
-// position from the start of the run, in device pixels.
+// A textRun is a string shaped onto one line in one typeface: each glyph with
+// its pen position from the start of the run, in device pixels.
 type textRun struct {
+	face   *typeface
 	glyphs []placedGlyph
 	width  fixed.Int26_6
 }
 
 type placedGlyph struct {
-	id   sfnt.GlyphIndex
-	x, y fixed.Int26_6
+	id      sfnt.GlyphIndex
+	x, y    fixed.Int26_6
+	cluster int // index of the first rune this glyph draws
 }
 
 type runKey struct {
@@ -47,6 +50,18 @@ func (r *renderer) measure(s string, bold bool) float64 {
 	return float64(r.layout(s, bold).width) / 64
 }
 
+// xAt is where the text at byte offset i of s starts in run, s's layout, in
+// device pixels.
+func (r *renderer) xAt(s string, run textRun, i int) float64 {
+	n := utf8.RuneCountInString(s[:i])
+	for _, g := range run.glyphs {
+		if g.cluster >= n {
+			return float64(g.x) / 64
+		}
+	}
+	return float64(run.width) / 64
+}
+
 // snap puts every glyph on a whole pixel. Below 2x a glyph that starts
 // between pixels comes out blurred, and each copy of a letter blurs
 // differently. At 2x and up the design's fractional spacing reads better.
@@ -62,51 +77,55 @@ func (fs *fontSet) run(s string, bold bool, px float64, snap bool) textRun {
 	if len(fs.runs) >= maxRuns {
 		clear(fs.runs)
 	}
-	run := fs.shape(s, bold, px, snap)
+	run := fs.shape(s, fs.typeface(bold), px, snap)
 	fs.runs[key] = run
 	return run
 }
 
 // shape lays s out with the font's own features: kerning, ligatures, and
-// contextual alternates such as Monaspace's texture healing.
-func (fs *fontSet) shape(s string, bold bool, px float64, snap bool) textRun {
+// contextual alternates such as Monaspace's texture healing. When snapping,
+// each advance rounds to whole pixels, so a monospace font keeps an even
+// grid like a terminal's, though lines can come out a little wider.
+func (fs *fontSet) shape(s string, tf *typeface, px float64, snap bool) textRun {
+	run := textRun{face: tf}
 	if s == "" {
-		return textRun{}
+		return run
 	}
-	tf := fs.typeface(bold)
 	runes := []rune(s)
-	out := fs.shaper.Shape(shaping.Input{
+	out := fs.shaper.ShapeNoExtents(shaping.Input{
 		Text:      runes,
 		RunEnd:    len(runes),
 		Direction: di.DirectionLTR,
-		Face:      tf.shaping,
+		Face:      tf.shapingFace,
 		Size:      fixed.Int26_6(math.Round(px * 64)),
-		// Latin has every feature list text uses. Other scripts still get
-		// their glyphs, as they did before shaping.
+		// Latin has every feature list text uses. Other scripts draw the
+		// glyphs the font has, as they did before shaping.
 		Script:   language.Latin,
 		Language: language.NewLanguage("en"),
 	})
 	track := fixed.Int26_6(math.Round(tf.tracking * px * 64))
-	var run textRun
+	run.glyphs = make([]placedGlyph, 0, len(out.Glyphs))
 	for _, g := range out.Glyphs {
-		x, advance := run.width+g.XOffset, g.XAdvance+track
+		x, advance := run.width+g.XOffset, g.Advance+track
 		if snap {
 			x, advance = fixed.I(x.Round()), fixed.I(advance.Round())
 		}
-		run.glyphs = append(run.glyphs, placedGlyph{id: sfnt.GlyphIndex(g.GlyphID), x: x, y: -g.YOffset})
+		run.glyphs = append(run.glyphs, placedGlyph{id: sfnt.GlyphIndex(g.GlyphID), x: x, y: -g.YOffset, cluster: g.ClusterIndex})
 		run.width += advance
 	}
 	return run
 }
 
 // drawRun draws run with its pen starting at origin, in device pixels.
-func (r *renderer) drawRun(img *image.RGBA, run textRun, origin fixed.Point26_6, bold bool, col color.RGBA) {
-	tf := r.fonts.typeface(bold)
+func (r *renderer) drawRun(img *image.RGBA, run textRun, origin fixed.Point26_6, col color.RGBA) {
+	if r.snap() {
+		origin.X = fixed.I(origin.X.Round())
+	}
 	ppem := fixed.Int26_6(math.Round(r.fonts.size * r.scale * 64))
 	src := image.NewUniform(col)
 	var buf sfnt.Buffer
 	for _, g := range run.glyphs {
-		segs, err := tf.outlines.LoadGlyph(&buf, g.id, ppem, nil)
+		segs, err := run.face.outlines.LoadGlyph(&buf, g.id, ppem, nil)
 		if err != nil || len(segs) == 0 {
 			continue // a space has no outline
 		}
@@ -123,8 +142,7 @@ func (r *renderer) fillGlyph(img *image.RGBA, segs sfnt.Segments, at fixed.Point
 	px := func(p fixed.Point26_6) (float32, float32) {
 		return float32(at.X+p.X)/64 - float32(box.Min.X), float32(at.Y+p.Y)/64 - float32(box.Min.Y)
 	}
-	ras := vector.NewRasterizer(box.Dx(), box.Dy())
-	ras.DrawOp = draw.Src
+	ras, mask := r.glyphBuffers(box.Dx(), box.Dy())
 	for _, seg := range segs {
 		switch seg.Op {
 		case sfnt.SegmentOpMoveTo:
@@ -142,7 +160,6 @@ func (r *renderer) fillGlyph(img *image.RGBA, segs sfnt.Segments, at fixed.Point
 			ras.CubeTo(ax, ay, bx, by, cx, cy)
 		}
 	}
-	mask := image.NewAlpha(image.Rect(0, 0, box.Dx(), box.Dy()))
 	ras.Draw(mask, mask.Bounds(), image.Opaque, image.Point{})
 	if curve := r.fonts.edge; curve != nil {
 		for i, a := range mask.Pix {
@@ -150,4 +167,20 @@ func (r *renderer) fillGlyph(img *image.RGBA, segs sfnt.Segments, at fixed.Point
 		}
 	}
 	draw.DrawMask(img, box, src, image.Point{}, mask, image.Point{}, draw.Over)
+}
+
+// glyphBuffers are the rasterizer and mask for one w×h glyph. They're reused
+// from glyph to glyph, so a frame doesn't allocate for every letter.
+func (r *renderer) glyphBuffers(w, h int) (*vector.Rasterizer, *image.Alpha) {
+	if r.glyphRas == nil {
+		r.glyphRas = vector.NewRasterizer(w, h)
+	} else {
+		r.glyphRas.Reset(w, h)
+	}
+	r.glyphRas.DrawOp = draw.Src
+	if cap(r.glyphMask.Pix) < w*h {
+		r.glyphMask.Pix = make([]uint8, w*h)
+	}
+	r.glyphMask = image.Alpha{Pix: r.glyphMask.Pix[:w*h], Stride: w, Rect: image.Rect(0, 0, w, h)}
+	return r.glyphRas, &r.glyphMask
 }

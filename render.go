@@ -152,6 +152,9 @@ type renderer struct {
 	// is and how open it is, for collapsing; geoH is the content height then.
 	geo  []rowGeo
 	geoH float64
+	// glyphRas and glyphMask are reused for every glyph drawn.
+	glyphRas  *vector.Rasterizer
+	glyphMask image.Alpha
 	// ring is the current match's outline, drawn over the rows where it is
 	// on its way to; nil draws none.
 	ring *ringGeo
@@ -476,6 +479,7 @@ func (r *renderer) text(img *image.RGBA, s string, x, y float64, bold bool, col 
 // (The current match is marked by an outline around its row, not here.)
 func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool, col color.RGBA, maxW float64, marks []span) (float64, bool) {
 	s, kept, truncated := r.fit(s, bold, maxW)
+	run := r.layout(s, bold)
 
 	// Highlights, mapped onto the drawn string, filled as one path so
 	// neighbors that touch don't darken where they overlap.
@@ -488,19 +492,15 @@ func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool
 		if a >= b {
 			continue
 		}
-		x0 := x + r.measure(s[:a], bold)/r.scale - 1
-		x1 := x + r.measure(s[:b], bold)/r.scale + 1
+		x0 := x + r.xAt(s, run, a)/r.scale - 1
+		x1 := x + r.xAt(s, run, b)/r.scale + 1
 		cy := y - baselineOffset
 		hl.poly(roundRect(x0, cy-9, x1, cy+9, 3))
 	}
 	hl.fill(r.tint(0.38))
 
 	origin := fixed.Point26_6{X: fixed.Int26_6(x * r.scale * 64), Y: fixed.Int26_6(math.Round(y*r.scale) * 64)}
-	if r.snap() {
-		origin.X = fixed.I(origin.X.Round())
-	}
-	run := r.layout(s, bold)
-	r.drawRun(img, run, origin, bold, col)
+	r.drawRun(img, run, origin, col)
 	return float64(run.width) / 64 / r.scale, truncated
 }
 
@@ -509,9 +509,11 @@ func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool
 // ellipsis.
 func (r *renderer) fit(s string, bold bool, maxW float64) (shown string, kept int, truncated bool) {
 	s = strings.ReplaceAll(s, "\t", " ") // fonts have no tab glyph
-	if maxW <= 0 || r.measure(s, bold) <= maxW*r.scale {
+	run := r.layout(s, bold)
+	if maxW <= 0 || float64(run.width)/64 <= maxW*r.scale {
 		return s, len(s), false
 	}
+	s = s[:r.longestCandidate(s, run, maxW*r.scale)]
 	const ell = "…"
 	for len(s) > 0 {
 		_, size := utf8.DecodeLastRuneInString(s)
@@ -522,6 +524,33 @@ func (r *renderer) fit(s string, bold bool, maxW float64) (shown string, kept in
 	}
 	s = trimRight(s)
 	return s + ell, len(s), true
+}
+
+// longestCandidate is where fit starts cutting s, in bytes. Once a rune
+// starts past limit, every longer prefix is too wide, so fit only needs to
+// try the prefixes up to that rune instead of shaping one per rune from the
+// end. It keeps that rune too, because fit drops a rune before each try.
+func (r *renderer) longestCandidate(s string, run textRun, limit float64) int {
+	for _, g := range run.glyphs {
+		if float64(g.x)/64 < limit {
+			continue
+		}
+		cut := runeOffset(s, g.cluster)
+		_, size := utf8.DecodeRuneInString(s[cut:])
+		return cut + size
+	}
+	return len(s)
+}
+
+// runeOffset is the byte offset of rune n in s.
+func runeOffset(s string, n int) int {
+	for i := range s {
+		if n == 0 {
+			return i
+		}
+		n--
+	}
+	return len(s)
 }
 
 // textWidth is how wide fit's text is drawn, in points.

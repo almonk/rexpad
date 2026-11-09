@@ -38,6 +38,9 @@ var (
 
 const (
 	defaultFontSize = 14.0 // points
+	// The layout's line height and baseline fit text from 10pt to 16pt.
+	minFontSize, maxFontSize   = 10.0, 16.0
+	minTextGamma, maxTextGamma = 0.5, 3.0
 	// Apple's SF Pro tracking at 14pt is -0.154pt; the static fonts don't
 	// apply it on their own. A font the user picks gets none.
 	defaultTracking = -0.011 // em
@@ -46,44 +49,56 @@ const (
 // typeface is one font file, parsed once for drawing outlines and once for
 // shaping. Both read the same bytes, so they agree on glyph IDs.
 type typeface struct {
-	outlines *sfnt.Font
-	shaping  *gtfont.Face
-	tracking float64 // em
+	outlines    *sfnt.Font
+	shapingFace *gtfont.Face
+	tracking    float64 // em
 }
 
 type fontSet struct {
 	regular, bold typeface
 	size          float64     // points
 	edge          *[256]uint8 // coverage curve that darkens text edges; nil leaves them as drawn
+	warnings      []string    // why a font the user named is not in use
 
 	mu     sync.Mutex
 	shaper shaping.HarfbuzzShaper
 	runs   map[runKey]textRun
 }
 
-func loadTypeface(env string, candidates []string, fallback []byte) (typeface, error) {
-	chosen := os.Getenv(env)
-	if chosen != "" {
-		candidates = append([]string{chosen}, candidates...)
+// loadTypeface loads the font named in $env, or else the first candidate
+// that loads, or else fallback. warning says why the named font was not used.
+func loadTypeface(env string, candidates []string, fallback []byte) (tf typeface, warning string, err error) {
+	if chosen := os.Getenv(env); chosen != "" {
+		tf, err := readTypeface(chosen)
+		if err == nil {
+			tf.tracking = 0
+			return tf, "", nil
+		}
+		warning = fmt.Sprintf("$%s %s: %v; using the default font", env, chosen, err)
 	}
 	for _, p := range candidates {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
+		if tf, err := readTypeface(p); err == nil {
+			return tf, warning, nil
 		}
-		tf, err := parseTypeface(data)
-		if err != nil {
-			continue
-		}
-		if p == chosen {
-			tf.tracking = 0
-		}
-		return tf, nil
 	}
-	return parseTypeface(fallback)
+	tf, err = parseTypeface(fallback)
+	return tf, warning, err
 }
 
+func readTypeface(path string) (typeface, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return typeface{}, err
+	}
+	return parseTypeface(data)
+}
+
+// parseTypeface reads a font file, or the first font of a collection (.ttc),
+// which is how macOS ships Menlo and Courier.
 func parseTypeface(data []byte) (typeface, error) {
+	if bytes.HasPrefix(data, []byte("ttcf")) {
+		return parseCollection(data)
+	}
 	outlines, err := sfnt.Parse(data)
 	if err != nil {
 		return typeface{}, err
@@ -92,32 +107,54 @@ func parseTypeface(data []byte) (typeface, error) {
 	if err != nil {
 		return typeface{}, err
 	}
-	return typeface{outlines: outlines, shaping: shapingFace, tracking: defaultTracking}, nil
+	return typeface{outlines: outlines, shapingFace: shapingFace, tracking: defaultTracking}, nil
+}
+
+func parseCollection(data []byte) (typeface, error) {
+	collection, err := sfnt.ParseCollection(data)
+	if err != nil {
+		return typeface{}, err
+	}
+	outlines, err := collection.Font(0)
+	if err != nil {
+		return typeface{}, err
+	}
+	shapingFaces, err := gtfont.ParseTTC(bytes.NewReader(data))
+	if err != nil {
+		return typeface{}, err
+	}
+	return typeface{outlines: outlines, shapingFace: shapingFaces[0], tracking: defaultTracking}, nil
 }
 
 func loadFonts() (*fontSet, error) {
-	regular, err := loadTypeface("REXPAD_FONT", regularCandidates, goregular.TTF)
+	regular, regularWarning, err := loadTypeface("REXPAD_FONT", regularCandidates, goregular.TTF)
 	if err != nil {
 		return nil, fmt.Errorf("load regular font: %w", err)
 	}
-	bold, err := loadTypeface("REXPAD_FONT_BOLD", boldCandidates, gobold.TTF)
+	bold, boldWarning, err := loadTypeface("REXPAD_FONT_BOLD", boldCandidates, gobold.TTF)
 	if err != nil {
 		return nil, fmt.Errorf("load bold font: %w", err)
 	}
-	return &fontSet{
+	fonts := &fontSet{
 		regular: regular,
 		bold:    bold,
-		size:    positiveSetting("REXPAD_FONT_SIZE", defaultFontSize),
-		edge:    edgeCurve(positiveSetting("REXPAD_TEXT_GAMMA", 1)),
+		size:    boundedSetting("REXPAD_FONT_SIZE", defaultFontSize, minFontSize, maxFontSize),
+		edge:    edgeCurve(boundedSetting("REXPAD_TEXT_GAMMA", 1, minTextGamma, maxTextGamma)),
 		runs:    map[runKey]textRun{},
-	}, nil
+	}
+	for _, w := range []string{regularWarning, boldWarning} {
+		if w != "" {
+			fonts.warnings = append(fonts.warnings, w)
+		}
+	}
+	return fonts, nil
 }
 
-// positiveSetting is the number in $key, or fallback when it's unset or not
-// a positive number.
-func positiveSetting(key string, fallback float64) float64 {
+// boundedSetting is the number in $key, or fallback when it's unset, not a
+// number, or outside [min, max].
+func boundedSetting(key string, fallback, min, max float64) float64 {
 	v, err := strconv.ParseFloat(os.Getenv(key), 64)
-	if err != nil || !(v > 0 && v < math.Inf(1)) {
+	if err != nil || !(v >= min && v <= max) {
 		return fallback
 	}
 	return v
@@ -142,4 +179,10 @@ func (fs *fontSet) typeface(bold bool) *typeface {
 		return &fs.bold
 	}
 	return &fs.regular
+}
+
+func printFontWarnings(fonts *fontSet) {
+	for _, w := range fonts.warnings {
+		fmt.Fprintln(os.Stderr, "rexpad:", w)
+	}
 }
