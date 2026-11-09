@@ -20,9 +20,10 @@ const usage = `rexpad: show an agent's todo list in a Rex pane (kitty graphics)
 Usage: rexpad [--list NAME] COMMAND [ARGS]
 
 Showing the list
-  show [--below] [--ratio PCT] [--theme T]   open the viewer beside your pane (30% by default, no focus change); idempotent
+  show [--below] [--ratio PCT] [--theme T] [--no-click]
+                                             open the viewer beside your pane (30% by default, no focus change); idempotent
   hide                                       close the viewer pane
-  view [--theme terminal|light|dark] [--scale N]
+  view [--theme terminal|light|dark] [--scale N] [--no-click]
                                              run the viewer in this terminal (/ finds, q quits)
   render -o FILE.png [--width PT] [--height PT] [--scale N] [--theme T]
                                              write a PNG of the list
@@ -42,6 +43,14 @@ Changing items
   edit ID TEXT                  change an item's text
   rm ID...                      delete items
   progress GROUP PCT|auto       pin a group's ring fill (0-100), or go back to counting items
+
+Waiting for the user
+  In the viewer, the user clicks an item's box to mark it done, or open again.
+  The item then has "by": "user" (see get --json) until a command changes it.
+  --no-click on show or view turns clicks off.
+  wait [ID...]                  wait until one of the items (no ID: any item) has the
+                                user's mark, then print those items. A mark from before
+                                the wait counts too.
 
 Markdown checklist for set:
   # Group title

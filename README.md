@@ -125,6 +125,34 @@ and the matched letters are highlighted. The match you're on gets an outline.
 | Esc | close find: the list unfolds and keeps the match you were on in view |
 | `/` again | back into the field with the query selected |
 
+### Checking items off yourself
+
+Some steps need you, for example a login or an approval in a browser. To
+mark an item done, click its checkbox in the pane. To open a done item
+again, click its box again. A click anywhere else does nothing, so you can
+click into the pane to scroll or find without a change to the list. After a
+click on a box, focus goes back to the agent's pane, so your typing still
+goes to the agent. While find is open, focus stays in the pane.
+
+rexpad marks each item that you click with `"by": "user"` in the list's
+JSON. `rexpad get --json` shows the mark, and `rexpad get` does not. Any
+command that changes the item clears the mark. So the mark tells the agent
+that the change came from you, and that it did not act on it yet.
+
+An agent can wait for your clicks:
+
+```bash
+rexpad wait 5 6   # wait until you click item 5 or 6
+rexpad wait       # wait until you click any item
+```
+
+`wait` prints the items that carry the mark, in the format of `rexpad get`,
+and exits. If an item already carries the mark when `wait` starts, `wait`
+exits at once, so a click never gets lost. An agent runs `wait` as a
+background command and continues when it exits.
+
+To open a pane that ignores clicks, run `rexpad show --no-click`.
+
 ## Using it with an agent
 
 You don't need to do anything once the skill is installed: when you give the
@@ -165,9 +193,11 @@ item's ID as `{#ID}`, and `rexpad set --json` takes the same list as JSON.
 rexpad [--list NAME] COMMAND
 
 Showing the list
-  show [--below] [--ratio PCT] [--theme T]  open the viewer beside your pane (30%, no focus change)
+  show [--below] [--ratio PCT] [--theme T] [--no-click]
+                                            open the viewer beside your pane (30%, no focus change)
   hide                                      close the viewer pane
-  view [--theme terminal|light|dark]        run the viewer in the current terminal (q quits)
+  view [--theme terminal|light|dark] [--no-click]
+                                            run the viewer in the current terminal (q quits)
   render -o FILE.png [--width PT]           write a PNG of the list
 
 Writing the whole list
@@ -185,6 +215,9 @@ Changing items
   edit ID TEXT / rm ID...
   progress GROUP PCT|auto        pin a group's ring, or go back to counting items
 
+Waiting for the user
+  wait [ID...]                   wait until the user clicks one of the items (no ID: any item), then print them
+
 Agent skill
   skill install [--dir DIR]      install the skill (default ~/.claude/skills)
   skill show                     print the skill
@@ -199,6 +232,7 @@ Agent skill
 | `--list NAME`, `$REXPAD_LIST` | the agent's pane (`$REX_BLOCK`) | Which list to use. Give several agents the same name to share one list. |
 | `--theme` | `terminal` | `terminal` follows the Rex theme; `light` and `dark` use fixed palettes. |
 | `--ratio PCT` | `30` | The pane's share of the split. |
+| `--no-click` | off | Clicks in the pane do not change the list. |
 | `--scale N` (`view`, `render`), `$REXPAD_SCALE` | from the cell size | Device pixels per point. |
 | `$REXPAD_FONT`, `$REXPAD_FONT_BOLD` | SF Pro Text | Paths to other font files. A `.ttc` collection uses its first font. SF Pro's tracking is not applied to them. If a font can't be used, `show` and `render` say why. |
 | `$REXPAD_FONT_SIZE` | `14` | Text size in points, from 10 to 16; other values use 14. Use the terminal's size to match its text, such as `12`. Row spacing does not change. |
@@ -214,7 +248,9 @@ values it started with, so run `hide` and then `show` to apply a change.
 ## How it works
 
 - **State**: each list is a JSON file in `~/.local/state/rexpad`. Commands
-  read it, change it, and write it back atomically.
+  read it, change it, and write it back atomically. Each write holds a lock
+  on `NAME.json.lock`, so the commands and the viewer never lose each
+  other's changes.
 - **The viewer** (`rexpad view`) is what runs in the pane. It checks the file
   every 150 ms and renders the whole list to one tall PNG at the pane's pixel
   density, which it uploads once with the kitty graphics protocol. Scrolling
@@ -223,6 +259,11 @@ values it started with, so run `hide` and then `show` to apply a change.
   columns and rows, so a client with different cell metrics (such as Rex on a
   phone) scales it to fit instead of overflowing. New images are placed before
   old ones are deleted, so updates don't flicker.
+- **Clicks**: the viewer asks for mouse reports with positions in pixels
+  (modes 1000, 1006, and 1016), and maps each click to a row of the frame
+  on screen. A press and a release on the same checkbox toggle the item.
+  Then the viewer runs `rex block focus` on the agent's pane, which `show`
+  gives it.
 - **Find**: rows fold away like an accordion. Only how open each row is
   eases; where the rows sit follows from that, so folding neighbors never
   overlap. Mid-fold, every frame is a new image the size of the view, about
