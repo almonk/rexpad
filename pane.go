@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -27,6 +28,25 @@ func viewerOpen(name string) (string, bool) {
 		return id, false
 	}
 	return id, true
+}
+
+// The Rex server starts the viewer in its own environment, not the caller's,
+// so the settings that change how the viewer draws or where it finds the
+// list go on its command line.
+var viewerSettings = []string{"REXPAD_FONT", "REXPAD_FONT_BOLD", "REXPAD_SCALE", "XDG_STATE_HOME"}
+
+func viewerCommand(self, name, theme string) []string {
+	view := []string{self, "view", "--list", name, "--theme", theme}
+	var settings []string
+	for _, key := range viewerSettings {
+		if value := os.Getenv(key); value != "" {
+			settings = append(settings, key+"="+value)
+		}
+	}
+	if len(settings) == 0 {
+		return view
+	}
+	return slices.Concat([]string{"/usr/bin/env"}, settings, view)
 }
 
 type showOptions struct {
@@ -52,7 +72,8 @@ func showPane(name string, opt showOptions) error {
 	if b := os.Getenv("REX_BLOCK"); b != "" {
 		args = append(args, "-b", b)
 	}
-	args = append(args, "--", self, "view", "--list", name, "--theme", opt.theme)
+	args = append(args, "--")
+	args = append(args, viewerCommand(self, name, opt.theme)...)
 	cmd := exec.Command("rex", args...)
 	cmd.Stderr = os.Stderr
 	outBytes, err := cmd.Output()

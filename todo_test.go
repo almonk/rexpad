@@ -1171,3 +1171,27 @@ func TestFindHighlightsOnWrappedLines(t *testing.T) {
 		}
 	}
 }
+
+func TestViewerCommandCarriesCallerSettings(t *testing.T) {
+	t.Setenv("REXPAD_FONT", "/fonts/Mono Regular.otf")
+	t.Setenv("REXPAD_FONT_BOLD", "")
+	t.Setenv("REXPAD_SCALE", "2")
+	t.Setenv("XDG_STATE_HOME", "/state")
+	got := viewerCommand("/bin/rexpad", "l", "dark")
+	want := []string{"/usr/bin/env", "REXPAD_FONT=/fonts/Mono Regular.otf", "REXPAD_SCALE=2", "XDG_STATE_HOME=/state",
+		"/bin/rexpad", "view", "--list", "l", "--theme", "dark"}
+	if !slices.Equal(got, want) {
+		t.Errorf("viewerCommand = %q\nwant %q", got, want)
+	}
+}
+
+func TestViewerCommandWithoutSettings(t *testing.T) {
+	for _, k := range viewerSettings {
+		t.Setenv(k, "")
+	}
+	got := viewerCommand("/bin/rexpad", "l", "terminal")
+	want := []string{"/bin/rexpad", "view", "--list", "l", "--theme", "terminal"}
+	if !slices.Equal(got, want) {
+		t.Errorf("viewerCommand = %q\nwant %q", got, want)
+	}
+}
