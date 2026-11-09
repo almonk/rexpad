@@ -38,8 +38,10 @@ type Item struct {
 
 const byUser = "user"
 
-// set gives the item a status from a command, which clears the user's mark.
-func (it *Item) set(st Status) { it.Status, it.By = st, "" }
+// setByCommand and editByCommand are how commands change an item. They
+// clear the user's mark, which says the agent hasn't acted on a click yet.
+func (it *Item) setByCommand(st Status)    { it.Status, it.By = st, "" }
+func (it *Item) editByCommand(text string) { it.Text, it.By = text, "" }
 
 // clickedStatus is the status a click on an item's box gives it: a done
 // item opens again, and anything else is done.

@@ -137,7 +137,7 @@ func run(args []string) error {
 				if it == nil {
 					return fmt.Errorf("no item %d", n)
 				}
-				it.set(st)
+				it.setByCommand(st)
 			}
 			return nil
 		})
@@ -363,13 +363,13 @@ func run(args []string) error {
 				for gi := range l.Groups {
 					for ii := range l.Groups[gi].Items {
 						if it := &l.Groups[gi].Items[ii]; it.Status == StatusActive {
-							it.set(StatusPending)
+							it.setByCommand(StatusPending)
 						}
 					}
 				}
 			}
 			for _, n := range ns {
-				l.find(n).set(StatusActive)
+				l.find(n).setByCommand(StatusActive)
 			}
 			return nil
 		})
@@ -382,7 +382,7 @@ func run(args []string) error {
 			for gi := range l.Groups {
 				for ii := range l.Groups[gi].Items {
 					if it := &l.Groups[gi].Items[ii]; it.Status == StatusActive {
-						it.set(StatusDone)
+						it.setByCommand(StatusDone)
 					}
 				}
 			}
@@ -395,14 +395,14 @@ func run(args []string) error {
 			for gi := range l.Groups {
 				for ii := range l.Groups[gi].Items {
 					if it := &l.Groups[gi].Items[ii]; it.Status == StatusActive {
-						it.set(StatusDone)
+						it.setByCommand(StatusDone)
 					}
 				}
 			}
 			for gi := range l.Groups {
 				for ii := range l.Groups[gi].Items {
 					if it := &l.Groups[gi].Items[ii]; it.Status == StatusPending && started == nil {
-						it.set(StatusActive)
+						it.setByCommand(StatusActive)
 						started = it
 					}
 				}
@@ -446,8 +446,7 @@ func run(args []string) error {
 			if it == nil {
 				return fmt.Errorf("no item %d", ns[0])
 			}
-			it.Text = strings.Join(args[1:], " ")
-			it.By = ""
+			it.editByCommand(strings.Join(args[1:], " "))
 			return nil
 		})
 
