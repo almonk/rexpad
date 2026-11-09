@@ -406,6 +406,18 @@ func run(args []string) error {
 		}
 		return err
 
+	case "wait":
+		ns, err := ids(args)
+		if err != nil {
+			return err
+		}
+		l, err := waitForUser(path, ns, waitPoll)
+		if err != nil {
+			return err
+		}
+		fmt.Print(l.markdown(true))
+		return nil
+
 	case "undo", "uncheck":
 		return setStatus(args, StatusPending)
 

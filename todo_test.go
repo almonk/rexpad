@@ -1784,3 +1784,83 @@ func withStdin(t *testing.T, input string, fn func()) {
 	defer func() { os.Stdin = old; f.Close() }()
 	fn()
 }
+
+func TestWaitForUserReturnsMarkedItems(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path := listPath("wait")
+	l, _ := parseMarkdown("# Mine\n- [ ] agent's {#1}\n# Yours\n- [ ] log in {#2}\n- [ ] approve {#3}\n")
+	if err := saveList(path, l); err != nil {
+		t.Fatal(err)
+	}
+	// A click before the wait starts still counts: an agent can't start
+	// waiting at the same instant it adds the step.
+	if err := toggleByUser(path, 2, StatusPending); err != nil {
+		t.Fatal(err)
+	}
+	got, err := waitForUser(path, nil, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md := got.markdown(true); md != "# Yours\n- [x] log in {#2}\n" {
+		t.Errorf("wait printed %q", md)
+	}
+
+	// With IDs, only those items count.
+	start := time.Now()
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		toggleByUser(path, 3, StatusPending)
+	}()
+	got, err = waitForUser(path, []int{1, 3}, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md := got.markdown(true); md != "# Yours\n- [x] approve {#3}\n" {
+		t.Errorf("wait 1 3 printed %q", md)
+	}
+	if time.Since(start) < 40*time.Millisecond {
+		t.Error("wait 1 3 returned before the user changed 1 or 3")
+	}
+}
+
+func TestWaitForUserFailsOnMissingItems(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path := listPath("waitgone")
+	l, _ := parseMarkdown("- [ ] one {#1}\n- [ ] two {#2}\n")
+	if err := saveList(path, l); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := waitForUser(path, []int{9}, time.Millisecond); err == nil {
+		t.Error("wait on an item that doesn't exist should fail")
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		updateList(path, func(l *List) error { l.remove(2); return nil })
+	}()
+	done := make(chan error, 1)
+	go func() { _, err := waitForUser(path, []int{2}, time.Millisecond); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("wait should fail once its items are removed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait kept waiting on a removed item")
+	}
+}
+
+func TestWaitCommandPrintsTheGetFormat(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "waitcmd")
+	path := listPath("waitcmd")
+	l, _ := parseMarkdown("- [x] one {#1}\n")
+	if err := saveList(path, l); err != nil {
+		t.Fatal(err)
+	}
+	if err := toggleByUser(path, 1, StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureStdout(t, func() { mustRun(t, "wait", "1") }); got != "- [ ] one {#1}\n" {
+		t.Errorf("wait printed %q", got)
+	}
+}
