@@ -47,6 +47,8 @@ Changing items
 Waiting for the user
   In the viewer, the user clicks an item's box to mark it done, or open again.
   The item then has "by": "user" (see get --json) until a command changes it.
+  A click on a group's header collapses or expands the group ("collapsed": true
+  in get --json). Commands do not expand it, and set keeps it by title.
   --no-click on show or view turns clicks off.
   wait [ID...]                  wait until one of the items (no ID: any item) has the
                                 user's mark, then print those items. A mark from before
@@ -149,7 +151,7 @@ func run(args []string) error {
 		below := fs.Bool("below", false, "split below instead of right")
 		ratio := fs.Int("ratio", 30, "pane share of the split, percent")
 		theme := fs.String("theme", "terminal", "terminal (follow the Rex theme), light, or dark")
-		noClick := fs.Bool("no-click", false, "clicks do not toggle items")
+		noClick := fs.Bool("no-click", false, "clicks do not change the list")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
@@ -173,7 +175,7 @@ func run(args []string) error {
 		fs := flag.NewFlagSet("view", flag.ContinueOnError)
 		theme := fs.String("theme", "terminal", "terminal (follow the Rex theme), light, or dark")
 		scale := fs.Float64("scale", 0, "device pixels per point (0: from the cell size)")
-		noClick := fs.Bool("no-click", false, "clicks do not toggle items")
+		noClick := fs.Bool("no-click", false, "clicks do not change the list")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}

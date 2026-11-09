@@ -134,9 +134,10 @@ and the matched letters are highlighted. The match you're on gets an outline.
 
 Some steps need you, for example a login or an approval in a browser. To
 mark an item done, click its checkbox in the pane. To open a done item
-again, click its box again. A click anywhere else does nothing, so you can
-click into the pane to scroll or find without a change to the list. After a
-click, focus stays in the pane. To type to the agent again, click its pane.
+again, click its box again. A click on an item's text or between rows does
+nothing, so you can click into the pane to scroll or find without a change
+to the list. After a click, focus stays in the pane. To type to the agent
+again, click its pane.
 
 rexpad marks each item that you click with `"by": "user"` in the list's
 JSON. `rexpad get --json` shows the mark, and `rexpad get` does not. Any
@@ -157,6 +158,24 @@ background command and continues when it exits. `set` replaces every item
 and drops the marks, so an agent does not use `set` while a `wait` runs.
 
 To open a pane that ignores clicks, run `rexpad show --no-click`.
+
+### Collapsing groups
+
+To hide the items of a group, click anywhere on its header: the row with
+the ring and the title, down to the divider. The items fold away, and the
+arrow at the right of the header turns to point right. To show the items
+again, click the header again. The arrow points down while the group is
+open, and the ring still shows the group's progress while it is collapsed.
+
+rexpad stores the state as `"collapsed": true` on the group in the list's
+JSON, so it stays after the viewer restarts. `rexpad get --json` shows it,
+and `rexpad get` does not. Commands from the agent never expand a group,
+and `set` keeps the state of each group whose title stays the same. If the
+active item is in a collapsed group, the viewer follows the group's header.
+
+While find filters the list, the matching items show even in a collapsed
+group. A click on a header then only turns its arrow. The items fold when
+you close find or clear the query.
 
 ## Using it with an agent
 
@@ -268,10 +287,12 @@ values it started with, so run `hide` and then `show` to apply a change.
   (modes 1000, 1006, and 1016), and maps each click to a row of the frame
   on screen. Clicks work only after the terminal confirms mode 1016 (a
   DECRQM reply), because cell positions would land on the wrong rows. A press and a release on the same checkbox toggle the item.
+  A press and a release on the same header collapse or expand the group.
 - **Find**: rows fold away like an accordion. Only how open each row is
   eases; where the rows sit follows from that, so folding neighbors never
   overlap. Mid-fold, every frame is a new image the size of the view, about
   60 a second. Once the rows settle, the viewer goes back to one tall sheet.
+  A group that collapses or expands folds its items the same way.
 - **Text**: each string is shaped with
   [go-text/typesetting](https://github.com/go-text/typesetting), so the font's
   kerning, ligatures, and contextual alternates (such as Monaspace's texture
