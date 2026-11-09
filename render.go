@@ -309,7 +309,7 @@ const boxHitRight = marginLeft + (boxCenter+boxSize/2+textX)/2
 
 // hitItem is the item whose checkbox column holds the point (x, y), in
 // content points, or nil. geo, when it has a row for each row, is where
-// the rows are drawn while they fold; a row not fully open can't be hit.
+// the rows are drawn while they fold; a click cannot hit a row that is not fully open.
 func hitItem(l *List, geo []rowGeo, x, y float64) *Item {
 	if x < 0 || x >= boxHitRight {
 		return nil

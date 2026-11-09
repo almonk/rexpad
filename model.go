@@ -27,7 +27,7 @@ type Item struct {
 	Status Status `json:"status"`
 	// By is byUser when the user set Status by clicking the item's box in
 	// the viewer. Any command that changes the item clears it, so it means
-	// a change the agent hasn't acted on yet.
+	// a change that the agent did not act on yet.
 	By string `json:"by,omitempty"`
 
 	// lines are where Text's wrapped lines start, as byte offsets, for the
@@ -39,7 +39,7 @@ type Item struct {
 const byUser = "user"
 
 // setByCommand and editByCommand are how commands change an item. They
-// clear the user's mark, which says the agent hasn't acted on a click yet.
+// clear the user's mark, which says that the agent did not act on a click yet.
 func (it *Item) setByCommand(st Status)    { it.Status, it.By = st, "" }
 func (it *Item) editByCommand(text string) { it.Text, it.By = text, "" }
 

@@ -1800,7 +1800,7 @@ func TestWaitForUserReturnsMarkedItems(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	path := listPath("wait")
 	saveMarkdown(t, path, "# Mine\n- [ ] agent's {#1}\n# Yours\n- [ ] log in {#2}\n- [ ] approve {#3}\n")
-	// A click before the wait starts still counts: an agent can't start
+	// A click before the wait starts still counts: an agent cannot start
 	// waiting at the same instant it adds the step.
 	if err := toggleByUser(path, 2, StatusPending); err != nil {
 		t.Fatal(err)
@@ -1836,7 +1836,7 @@ func TestWaitForUserFailsOnMissingItems(t *testing.T) {
 	path := listPath("waitgone")
 	saveMarkdown(t, path, "- [ ] one {#1}\n- [ ] two {#2}\n")
 	if _, err := waitForUser(path, []int{9}, time.Millisecond); err == nil {
-		t.Error("wait on an item that doesn't exist should fail")
+		t.Error("wait on an item that does not exist should fail")
 	}
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -2004,7 +2004,7 @@ func TestClickTrackerPairsPressAndRelease(t *testing.T) {
 		var tr clickTracker
 		var got []int
 		for _, s := range c.steps {
-			got = append(got, tr.add(s, s.x)) // the step's x stands in for the box it's on
+			got = append(got, tr.add(s, s.x)) // the step's x stands in for the box it is on
 		}
 		if !slices.Equal(got, c.want) {
 			t.Errorf("%s: toggles %v, want %v", c.name, got, c.want)

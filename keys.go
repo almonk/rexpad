@@ -66,7 +66,7 @@ type termEvent struct {
 type modeReport struct{ mode, value int }
 
 // on reports whether the mode is set (1) or permanently set (3). A terminal
-// that doesn't know the mode answers 0.
+// that does not know the mode answers 0.
 func (m modeReport) on() bool { return m.value == 1 || m.value == 3 }
 
 // mouseClick is the left button going down or up, in pixels from the

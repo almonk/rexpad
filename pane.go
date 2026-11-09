@@ -55,7 +55,7 @@ type showOptions struct {
 	split   string
 	ratio   int
 	theme   string
-	noClick bool // a read-only viewer: clicks don't toggle items
+	noClick bool // a read-only viewer: clicks do not toggle items
 }
 
 func showPane(name string, opt showOptions) error {

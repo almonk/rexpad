@@ -24,7 +24,7 @@ type viewOptions struct {
 	theme       string  // terminal (follow the terminal's colors), light, or dark
 	scale       float64 // device pixels per point; 0 picks from the cell size
 	returnFocus string  // the Rex pane to give focus to after a click, if any
-	noClick     bool    // clicks don't toggle items
+	noClick     bool    // clicks do not toggle items
 }
 
 // clickedItem is the item whose box a click at pixel c is on, in the frame
@@ -41,7 +41,7 @@ func clickedItem(l *List, geo []rowGeo, c mouseClick, scale float64, offsetPx, v
 // only when the button goes down and comes up on the same item's box.
 type clickTracker struct{ pressed int }
 
-// add takes a press or release on item id (0 when it's on no box) and
+// add takes a press or release on item id (0 when it is on no box) and
 // returns the item to toggle, or 0.
 func (t *clickTracker) add(c mouseClick, id int) int {
 	if !c.release {
@@ -1153,7 +1153,7 @@ func runView(name string, opt viewOptions) error {
 	//
 	// Clicks work only once the terminal confirms that it reports pixels
 	// (mode 1016): a terminal that reports cells instead would put every
-	// click on the first rows. A made-up pixel size can't be mapped either.
+	// click on the first rows. A made-up pixel size cannot be mapped either.
 	var clicks clickTracker
 	pixelReports := false
 	handleClick := func(c mouseClick) {
@@ -1170,7 +1170,7 @@ func runView(name string, opt viewOptions) error {
 		}
 		if err := toggleByUser(path, id, it.Status); err != nil {
 			// The pane has no room for a message: the bell says the
-			// click didn't take, and the box shows it unchanged.
+			// click did not take, and the box shows it unchanged.
 			fmt.Fprint(w, "\a")
 		}
 		draw(false)
