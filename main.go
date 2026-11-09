@@ -54,7 +54,8 @@ Agent skill
   skill show                    print the skill
 
 The list defaults to one per agent pane ($REX_BLOCK). Override with --list or $REXPAD_LIST.
-Settings: $REXPAD_FONT and $REXPAD_FONT_BOLD (font files), $REXPAD_SCALE, $XDG_STATE_HOME.
+Settings: $REXPAD_FONT and $REXPAD_FONT_BOLD (font files), $REXPAD_FONT_SIZE (10 to 16 points),
+$REXPAD_TEXT_GAMMA (0.5 to 3; above 1 darkens text edges), $REXPAD_SCALE, $XDG_STATE_HOME.
 show passes them to the viewer pane.
 `
 
@@ -153,6 +154,13 @@ func run(args []string) error {
 		if *below {
 			split = "below"
 		}
+		// The viewer loads the fonts too, but its pane shows only the
+		// picture, so warn here, where the caller sees it.
+		fonts, err := loadFonts()
+		if err != nil {
+			return err
+		}
+		printFontWarnings(fonts)
 		return showPane(name, showOptions{split: split, ratio: *ratio, theme: *theme})
 
 	case "hide":
@@ -188,6 +196,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		printFontWarnings(fonts)
 		pal := lightPalette
 		if *theme == "dark" {
 			pal = darkPalette

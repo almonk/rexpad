@@ -18,6 +18,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/image/font/gofont/goregular"
+	"golang.org/x/image/font/sfnt"
 )
 
 const sample = `# Investigate the crash
@@ -1072,8 +1076,13 @@ func TestDotsFollowTheText(t *testing.T) {
 }
 
 func TestItemsWrap(t *testing.T) {
-	fonts, _ := loadFonts()
-	r := &renderer{fonts: fonts, scale: 2, pal: lightPalette}
+	for _, scale := range []float64{1, 2} {
+		t.Run(fmt.Sprint(scale, "x"), func(t *testing.T) { testItemsWrap(t, scale) })
+	}
+}
+
+func testItemsWrap(t *testing.T, scale float64) {
+	r := &renderer{fonts: testFonts(t), scale: scale, pal: lightPalette}
 	text := "Order the CNC cells and conveyors before the steel frame goes up"
 	maxW := 160.0
 	starts := r.wrapText(text, maxW)
@@ -1230,7 +1239,8 @@ func TestViewerSettingsCoverEveryEnvRead(t *testing.T) {
 		"REXPAD_LIST": true, "REX_BLOCK": true, // show passes --list
 		"REX_SERVER": true, // read only by show
 	}
-	getenv := regexp.MustCompile(`os\.Getenv\("([A-Z_]+)"\)`)
+	// Any quoted setting name counts, so a read through a helper is found too.
+	getenv := regexp.MustCompile(`"((?:REXPAD|XDG)_[A-Z_]+)"`)
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -1247,6 +1257,362 @@ func TestViewerSettingsCoverEveryEnvRead(t *testing.T) {
 			if key := m[1]; !passedAnotherWay[key] && !slices.Contains(viewerSettings, key) {
 				t.Errorf("%s reads $%s, which show does not pass to the viewer", f, key)
 			}
+		}
+	}
+}
+
+// fontFile writes Go's bundled regular font to a file, as a stand-in for a
+// font the user names in $REXPAD_FONT.
+func fontFile(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "font.ttf")
+	if err := os.WriteFile(p, goregular.TTF, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// clearTextSettings keeps a developer's own $REXPAD_* values out of a test.
+func clearTextSettings(t *testing.T) {
+	for _, k := range []string{"REXPAD_FONT", "REXPAD_FONT_BOLD", "REXPAD_FONT_SIZE", "REXPAD_TEXT_GAMMA"} {
+		t.Setenv(k, "")
+	}
+}
+
+func mustLoadFonts(t *testing.T) *fontSet {
+	t.Helper()
+	fonts, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fonts
+}
+
+func testFonts(t *testing.T) *fontSet {
+	t.Helper()
+	clearTextSettings(t)
+	return mustLoadFonts(t)
+}
+
+// installedFont is the first of paths that exists, or skips the test: some
+// checks need a font with real shaping features, which the bundled Go fonts
+// don't have.
+func installedFont(t *testing.T, paths ...string) string {
+	t.Helper()
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	t.Skipf("none of these fonts is installed: %v", paths)
+	return ""
+}
+
+// ink is how much alpha img holds in total, and the box around it.
+func ink(img *image.RGBA) (sum int, box image.Rectangle) {
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if a := img.RGBAAt(x, y).A; a > 0 {
+				sum += int(a)
+				box = box.Union(image.Rect(x, y, x+1, y+1))
+			}
+		}
+	}
+	return sum, box
+}
+
+// drawText draws s alone on a transparent image and returns the image.
+func drawText(r *renderer, s string, x float64, bold bool) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, 400, 80))
+	r.text(img, s, x, 40, bold, color.RGBA{A: 255}, 0)
+	return img
+}
+
+func TestFontSettingsDefaults(t *testing.T) {
+	fonts := testFonts(t)
+	if fonts.size != 14 || fonts.regular.tracking != -0.011 || fonts.edge != nil || len(fonts.warnings) > 0 {
+		t.Errorf("size %v, tracking %v, edge set %v, warnings %q; want 14, -0.011, false, none",
+			fonts.size, fonts.regular.tracking, fonts.edge != nil, fonts.warnings)
+	}
+}
+
+func TestFontSettingsFromEnvironment(t *testing.T) {
+	clearTextSettings(t)
+	t.Setenv("REXPAD_FONT", fontFile(t))
+	t.Setenv("REXPAD_FONT_SIZE", "12")
+	t.Setenv("REXPAD_TEXT_GAMMA", "1.4")
+	fonts := mustLoadFonts(t)
+	// SF Pro's tracking is wrong for any other font.
+	if fonts.size != 12 || fonts.regular.tracking != 0 || len(fonts.warnings) > 0 {
+		t.Errorf("size %v, tracking %v, warnings %q; want 12, 0, none", fonts.size, fonts.regular.tracking, fonts.warnings)
+	}
+	if fonts.edge == nil || fonts.edge[0] != 0 || fonts.edge[255] != 255 || fonts.edge[128] <= 128 {
+		t.Errorf("gamma 1.4 should darken edges and keep 0 and 255: %v", fonts.edge)
+	}
+}
+
+func TestFontSettingsIgnoreBadValues(t *testing.T) {
+	junk := filepath.Join(t.TempDir(), "junk.otf")
+	if err := os.WriteFile(junk, []byte("not a font"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ font, size, gamma string }{
+		{junk, "-3", "dark"},
+		{"/no/such/font.otf", "17", "3.5"}, // past the caps
+		{junk, "9.5", "0.4"},
+	} {
+		clearTextSettings(t)
+		t.Setenv("REXPAD_FONT", c.font)
+		t.Setenv("REXPAD_FONT_SIZE", c.size)
+		t.Setenv("REXPAD_TEXT_GAMMA", c.gamma)
+		fonts := mustLoadFonts(t)
+		if fonts.size != 14 || fonts.regular.tracking != -0.011 || fonts.edge != nil {
+			t.Errorf("%+v: size %v, tracking %v, edge set %v; want the defaults", c, fonts.size, fonts.regular.tracking, fonts.edge != nil)
+		}
+		if len(fonts.warnings) != 1 || !strings.Contains(fonts.warnings[0], c.font) {
+			t.Errorf("%+v: warnings %q, want one that names the font", c, fonts.warnings)
+		}
+	}
+}
+
+func TestFontLoadsFromACollection(t *testing.T) {
+	clearTextSettings(t)
+	t.Setenv("REXPAD_FONT", installedFont(t, "/System/Library/Fonts/Menlo.ttc", "/System/Library/Fonts/Courier.ttc"))
+	fonts := mustLoadFonts(t)
+	if fonts.regular.tracking != 0 || len(fonts.warnings) > 0 {
+		t.Errorf("tracking %v, warnings %q: the .ttc was not used", fonts.regular.tracking, fonts.warnings)
+	}
+}
+
+func TestTextSnapsToWholePixelsBelow2x(t *testing.T) {
+	fonts := testFonts(t)
+	whole := func(scale float64) bool {
+		run := (&renderer{fonts: fonts, scale: scale}).layout("Review the patch, then open the PR", false)
+		for _, g := range run.glyphs {
+			if g.x%64 != 0 {
+				return false
+			}
+		}
+		return run.width%64 == 0
+	}
+	if !whole(1) {
+		t.Error("at 1x every glyph should start on a whole pixel")
+	}
+	if whole(2) {
+		t.Error("at 2x glyphs keep their fractional positions, as the design has them")
+	}
+}
+
+func TestTextStartsOnAWholePixelBelow2x(t *testing.T) {
+	r := &renderer{fonts: testFonts(t), scale: 1}
+	imgA := drawText(r, "a", 10.3, false)
+	_, a := ink(imgA)
+	imgB := drawText(r, "a", 10.7, false)
+	_, b := ink(imgB)
+	if a.Size() != b.Size() {
+		t.Fatalf("ink boxes %v and %v differ in size", a, b)
+	}
+	for y := 0; y < a.Dy(); y++ {
+		for x := 0; x < a.Dx(); x++ {
+			pa := imgA.RGBAAt(a.Min.X+x, a.Min.Y+y)
+			pb := imgB.RGBAAt(b.Min.X+x, b.Min.Y+y)
+			if pa != pb {
+				t.Fatalf("the same letter drew differently at x=10.3 and x=10.7 (%v vs %v at %d,%d)", pa, pb, x, y)
+			}
+		}
+	}
+}
+
+func TestLayoutGlyphsMatchTheFont(t *testing.T) {
+	clearTextSettings(t)
+	t.Setenv("REXPAD_FONT", fontFile(t))
+	fonts := mustLoadFonts(t)
+	const s = "Ship it"
+	run := (&renderer{fonts: fonts, scale: 2}).layout(s, false)
+	var buf sfnt.Buffer
+	var want []sfnt.GlyphIndex
+	for _, c := range s {
+		id, _ := fonts.regular.outlines.GlyphIndex(&buf, c)
+		want = append(want, id)
+	}
+	var got []sfnt.GlyphIndex
+	for _, g := range run.glyphs {
+		got = append(got, g.id)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("shaped glyphs %v, want the font's own %v", got, want)
+	}
+}
+
+func TestMeasureMatchesDrawnText(t *testing.T) {
+	fonts := testFonts(t)
+	for _, scale := range []float64{1, 2} {
+		r := &renderer{fonts: fonts, scale: scale, pal: lightPalette}
+		img := image.NewRGBA(image.Rect(0, 0, 800, 100))
+		const s = "Wrap long items, and refresh the README"
+		drawn, _ := r.text(img, s, 10, 40, false, lightPalette.text, 0)
+		if measured := r.measure(s, false) / scale; measured != drawn {
+			t.Errorf("at %vx: measured %v points, drew %v", scale, measured, drawn)
+		}
+	}
+}
+
+func TestFontSizeChangesText(t *testing.T) {
+	sized := func(size string) (width float64, height int) {
+		clearTextSettings(t)
+		t.Setenv("REXPAD_FONT_SIZE", size)
+		r := &renderer{fonts: mustLoadFonts(t), scale: 2}
+		_, box := ink(drawText(r, "H", 10, false))
+		return r.measure("Ship it", false), box.Dy()
+	}
+	w12, h12 := sized("12")
+	w14, h14 := sized("14")
+	if w12 >= w14 || h12 >= h14 {
+		t.Errorf("12pt text is %vpx wide and %vpx tall, 14pt is %v and %v; want 12pt smaller in both", w12, h12, w14, h14)
+	}
+}
+
+func TestTextGammaDarkensEdges(t *testing.T) {
+	fonts := testFonts(t)
+	r := &renderer{fonts: fonts, scale: 1}
+	plain, _ := ink(drawText(r, "o", 10, false))
+	fonts.edge = edgeCurve(2)
+	darker, _ := ink(drawText(r, "o", 10, false))
+	if darker <= plain {
+		t.Errorf("ink with gamma 2 is %d, without %d; want more", darker, plain)
+	}
+}
+
+func TestBoldTextUsesBoldOutlines(t *testing.T) {
+	r := &renderer{fonts: testFonts(t), scale: 2}
+	regular, _ := ink(drawText(r, "Plan", 10, false))
+	bold, _ := ink(drawText(r, "Plan", 10, true))
+	if bold <= regular*11/10 {
+		t.Errorf("bold ink %d is not clearly more than regular %d", bold, regular)
+	}
+}
+
+func TestShapingKernsWithSFPro(t *testing.T) {
+	clearTextSettings(t)
+	t.Setenv("REXPAD_FONT", installedFont(t, "/Library/Fonts/SF-Pro-Text-Regular.otf",
+		filepath.Join(os.Getenv("HOME"), "Library/Fonts/SF-Pro-Text-Regular.otf")))
+	r := &renderer{fonts: mustLoadFonts(t), scale: 2}
+	if pair, apart := r.measure("AV", false), r.measure("A", false)+r.measure("V", false); pair >= apart {
+		t.Errorf(`"AV" is %vpx, "A" and "V" apart %vpx; the kerning pair was not applied`, pair, apart)
+	}
+	// A find highlight that starts at V starts where V is drawn.
+	run := r.layout("AV", false)
+	if x := r.xAt("AV", run, 1); x != float64(run.glyphs[1].x)/64 || x >= r.measure("A", false) {
+		t.Errorf("x of V is %v, glyph at %v, A alone %v", x, float64(run.glyphs[1].x)/64, r.measure("A", false))
+	}
+}
+
+func TestShapingHealsTextureWithMonaspace(t *testing.T) {
+	clearTextSettings(t)
+	home := os.Getenv("HOME")
+	t.Setenv("REXPAD_FONT", installedFont(t,
+		filepath.Join(home, "Library/Fonts/MonaspaceArgon-Regular.otf"),
+		"/Library/Fonts/MonaspaceArgon-Regular.otf",
+		"/usr/share/fonts/opentype/monaspace/MonaspaceArgon-Regular.otf"))
+	r := &renderer{fonts: mustLoadFonts(t), scale: 2}
+	alone := r.layout("m", false).glyphs[0].id
+	if healed := r.layout("mil", false).glyphs[0].id; healed == alone {
+		t.Errorf(`"m" before "il" is glyph %d, the same as alone; contextual alternates were not applied`, healed)
+	}
+}
+
+// fitByShortening is the plain way to fit s: drop a rune at a time until the
+// rest and an ellipsis fit.
+func fitByShortening(r *renderer, s string, bold bool, maxW float64) (string, int, bool) {
+	if r.measure(s, bold) <= maxW*r.scale {
+		return s, len(s), false
+	}
+	for len(s) > 0 {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+		if r.measure(trimRight(s)+"…", bold) <= maxW*r.scale {
+			break
+		}
+	}
+	s = trimRight(s)
+	return s + "…", len(s), true
+}
+
+func TestFitMatchesShortening(t *testing.T) {
+	fonts := testFonts(t)
+	texts := []string{
+		"Order the CNC cells and conveyors before the steel frame goes up",
+		"Review the patch, then open the PR on almonk/rexpad",
+		"naïve café — straße, 日本語 mixed in",
+	}
+	for _, scale := range []float64{1, 2} {
+		r := &renderer{fonts: fonts, scale: scale}
+		for _, s := range texts {
+			for _, maxW := range []float64{20, 60, 133.3, 250, 1000} {
+				shown, kept, cut := r.fit(s, false, maxW)
+				wShown, wKept, wCut := fitByShortening(r, s, false, maxW)
+				if shown != wShown || kept != wKept || cut != wCut {
+					t.Errorf("%vx, %q in %vpt: fit gave %q %d %v, want %q %d %v", scale, s, maxW, shown, kept, cut, wShown, wKept, wCut)
+				}
+			}
+		}
+	}
+}
+
+func TestXAtMatchesTheRun(t *testing.T) {
+	r := &renderer{fonts: testFonts(t), scale: 1}
+	const s = "Ship it…"
+	run := r.layout(s, false)
+	for i, g := range run.glyphs {
+		at := len(string([]rune(s)[:i]))
+		if x := r.xAt(s, run, at); x != float64(g.x)/64 {
+			t.Errorf("x at byte %d is %v, glyph %d is at %v", at, x, i, float64(g.x)/64)
+		}
+	}
+	if x := r.xAt(s, run, len(s)); x != float64(run.width)/64 {
+		t.Errorf("x at the end is %v, the run is %v wide", x, float64(run.width)/64)
+	}
+}
+
+// stderrOf runs f and returns what it wrote to stderr.
+func stderrOf(t *testing.T, f func() error) string {
+	t.Helper()
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = write
+	runErr := f()
+	os.Stderr = saved
+	write.Close()
+	out, _ := io.ReadAll(read)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	return string(out)
+}
+
+func TestShowAndRenderWarnAboutAnUnusableFont(t *testing.T) {
+	clearTextSettings(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "w")
+	t.Setenv("REXPAD_FONT", "/no/such/font.otf")
+	if err := run([]string{"add", "an item"}); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "rex"), []byte("#!/bin/sh\necho block-1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REX_SERVER", "test")
+	t.Setenv("REX_BLOCK", "")
+	png := filepath.Join(t.TempDir(), "list.png")
+	for _, args := range [][]string{{"render", "-o", png}, {"show"}} {
+		if got := stderrOf(t, func() error { return run(args) }); !strings.Contains(got, "/no/such/font.otf") {
+			t.Errorf("%v wrote %q to stderr, want a warning that names the font", args, got)
 		}
 	}
 }

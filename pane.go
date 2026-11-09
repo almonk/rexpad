@@ -33,7 +33,9 @@ func viewerOpen(name string) (string, bool) {
 // The Rex server starts the viewer in its own environment, not the caller's,
 // so the settings that change how the viewer draws or where it finds the
 // list go on its command line.
-var viewerSettings = []string{"REXPAD_FONT", "REXPAD_FONT_BOLD", "REXPAD_SCALE", "XDG_STATE_HOME"}
+var viewerSettings = []string{
+	"REXPAD_FONT", "REXPAD_FONT_BOLD", "REXPAD_FONT_SIZE", "REXPAD_TEXT_GAMMA", "REXPAD_SCALE", "XDG_STATE_HOME",
+}
 
 func viewerCommand(self, name, theme string) []string {
 	view := []string{self, "view", "--list", name, "--theme", theme}

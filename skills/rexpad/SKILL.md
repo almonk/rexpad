@@ -58,7 +58,7 @@ again. Keep the `{#ID}` suffixes to preserve IDs, or drop them to renumber.
 ## Writing good items
 
 - Short, specific, imperative, on one line: "Add a regression test for
-  restore-on-launch", not "Testing". Long items are cut with an ellipsis.
+  restore-on-launch", not "Testing". Long items wrap onto more lines.
 - Use the user's names for things (files, tickets, people).
 - A group's ring fills as its items are done (active counts half). Pin it with
   `rexpad progress GROUP 75` if the items don't tell the whole story, and
