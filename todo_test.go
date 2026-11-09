@@ -1980,44 +1980,28 @@ func TestParseSGRMouseRejectsMalformedReports(t *testing.T) {
 }
 
 func TestClickTrackerPairsPressAndRelease(t *testing.T) {
+	// Each step is a press (down) or a release (up) on an item's box, 0 for
+	// no box. want is what each step toggles.
+	down := func(id int) mouseClick { return mouseClick{x: id} }
+	up := func(id int) mouseClick { return mouseClick{x: id, release: true} }
 	cases := []struct {
 		name  string
-		steps []struct {
-			release bool
-			id      int
-		}
-		want []int
+		steps []mouseClick
+		want  []int
 	}{
-		{"down and up on one box", []struct {
-			release bool
-			id      int
-		}{{false, 1}, {true, 1}}, []int{0, 1}},
-		{"down on one box, up on another", []struct {
-			release bool
-			id      int
-		}{{false, 1}, {true, 2}}, []int{0, 0}},
-		{"down off a box, up on one", []struct {
-			release bool
-			id      int
-		}{{false, 0}, {true, 2}}, []int{0, 0}},
-		{"up with no press", []struct {
-			release bool
-			id      int
-		}{{true, 3}}, []int{0}},
-		{"a second press replaces the first", []struct {
-			release bool
-			id      int
-		}{{false, 1}, {false, 2}, {true, 2}}, []int{0, 0, 2}},
-		{"one press, two releases", []struct {
-			release bool
-			id      int
-		}{{false, 1}, {true, 1}, {true, 1}}, []int{0, 1, 0}},
+		{"down and up on one box", []mouseClick{down(1), up(1)}, []int{0, 1}},
+		{"down on one box, up on another", []mouseClick{down(1), up(2)}, []int{0, 0}},
+		{"down off a box, up on one", []mouseClick{down(0), up(2)}, []int{0, 0}},
+		{"up with no press", []mouseClick{up(3)}, []int{0}},
+		{"a second press replaces the first", []mouseClick{down(1), down(2), up(2)}, []int{0, 0, 2}},
+		{"one press, two releases", []mouseClick{down(1), up(1), up(1)}, []int{0, 1, 0}},
+		{"a release off the box ends the press", []mouseClick{down(1), up(0), up(1)}, []int{0, 0, 0}},
 	}
 	for _, c := range cases {
 		var tr clickTracker
 		var got []int
 		for _, s := range c.steps {
-			got = append(got, tr.add(mouseClick{release: s.release}, s.id))
+			got = append(got, tr.add(s, s.x)) // the step's x stands in for the box it's on
 		}
 		if !slices.Equal(got, c.want) {
 			t.Errorf("%s: toggles %v, want %v", c.name, got, c.want)
