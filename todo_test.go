@@ -1883,6 +1883,14 @@ func TestDecodeClicks(t *testing.T) {
 	}
 }
 
+// itemID is the item's ID, or 0 for no item.
+func itemID(it *Item) int {
+	if it == nil {
+		return 0
+	}
+	return it.ID
+}
+
 func TestHitItem(t *testing.T) {
 	l, _ := parseMarkdown("# G\n- [ ] a {#1}\n- [ ] b {#2}\n# H\n- [ ] c {#3}\n")
 	l.find(2).lines = []int{0, 1} // b wraps to two lines
@@ -1894,12 +1902,6 @@ func TestHitItem(t *testing.T) {
 		}
 	}
 	boxX := marginLeft + boxCenter
-	id := func(it *Item) int {
-		if it == nil {
-			return 0
-		}
-		return it.ID
-	}
 	cases := []struct {
 		name string
 		x, y float64
@@ -1915,7 +1917,7 @@ func TestHitItem(t *testing.T) {
 		{"below the list", boxX, center[3] + itemPitch, 0},
 	}
 	for _, c := range cases {
-		if got := id(hitItem(l, nil, c.x, c.y)); got != c.want {
+		if got := itemID(hitItem(l, nil, c.x, c.y)); got != c.want {
 			t.Errorf("%s: hit %d, want %d", c.name, got, c.want)
 		}
 	}
@@ -1923,14 +1925,14 @@ func TestHitItem(t *testing.T) {
 	// While find folds rows away, a click hits the row drawn there, and
 	// never one still folding.
 	geo, _ := geoFor(l, []bool{true, false, true, true, true})
-	if got := id(hitItem(l, geo, boxX, geo[2].center)); got != 2 {
+	if got := itemID(hitItem(l, geo, boxX, geo[2].center)); got != 2 {
 		t.Errorf("folded: hit %d where item 2 is drawn, want 2", got)
 	}
-	if got := id(hitItem(l, geo, boxX, center[1])); got == 1 {
+	if got := itemID(hitItem(l, geo, boxX, center[1])); got == 1 {
 		t.Error("folded: hit item 1, which is folded away")
 	}
 	geo[4].open = 0.5
-	if got := id(hitItem(l, geo, boxX, geo[4].center)); got != 0 {
+	if got := itemID(hitItem(l, geo, boxX, geo[4].center)); got != 0 {
 		t.Errorf("hit item %d while it was still folding", got)
 	}
 }
@@ -1941,21 +1943,15 @@ func TestClickedItemUsesTheFrameOnScreen(t *testing.T) {
 	const scale = 2.0
 	boxPx := int((marginLeft + boxCenter) * scale)
 	at := func(id int) int { return int(rows[id-1].center * scale) }
-	id := func(it *Item) int {
-		if it == nil {
-			return 0
-		}
-		return it.ID
-	}
-	if got := id(clickedItem(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, 0, 1000)); got != 2 {
+	if got := itemID(clickedItem(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, 0, 1000)); got != 2 {
 		t.Errorf("unscrolled: hit %d, want 2", got)
 	}
 	// Scrolled down one row: item 3 is drawn where item 2 was.
-	if got := id(clickedItem(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, int(itemPitch*scale), 1000)); got != 3 {
+	if got := itemID(clickedItem(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, int(itemPitch*scale), 1000)); got != 3 {
 		t.Errorf("scrolled: hit %d, want 3", got)
 	}
 	// The find bar covers the pane below viewPx.
-	if got := id(clickedItem(l, nil, mouseClick{x: boxPx, y: at(3)}, scale, 0, at(3)-10)); got != 0 {
+	if got := itemID(clickedItem(l, nil, mouseClick{x: boxPx, y: at(3)}, scale, 0, at(3)-10)); got != 0 {
 		t.Errorf("a click on the find bar hit item %d", got)
 	}
 }
