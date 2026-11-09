@@ -58,11 +58,41 @@ again. Keep the `{#ID}` suffixes to preserve IDs, or drop them to renumber.
 ## Writing good items
 
 - Short, specific, imperative, on one line: "Add a regression test for
-  restore-on-launch", not "Testing". Long items are cut with an ellipsis.
+  restore-on-launch", not "Testing". Long items wrap onto more lines.
 - Use the user's names for things (files, tickets, people).
 - A group's ring fills as its items are done (active counts half). Pin it with
   `rexpad progress GROUP 75` if the items don't tell the whole story, and
   `rexpad progress GROUP auto` to go back.
+
+## Steps the user must do
+
+Some steps need the user, for example a login, an approval, or a value that
+only they know. Add each one as an item, and ask the user to click its box
+in the pane when they finish. The pane must be open (`rexpad show`), or the
+user has no box to click. Then run `rexpad wait` as a background command,
+so that you continue when the user clicks:
+
+```bash
+rexpad add -g "Your part" "Log in to the AWS console"   # prints the ID, here 5
+rexpad wait 5    # in the background: exits when the user clicks box 5
+```
+
+`wait` prints the clicked items in the format of `rexpad get`, for example
+`- [x] Log in to the AWS console {#5}`, and exits.
+
+- A click marks the item `"by": "user"`, which `rexpad get --json` shows.
+  Any command that changes the item clears the mark.
+- `wait` exits at once if an item already has the mark. So a click that
+  comes before `wait` starts is not lost.
+- `rexpad wait` with no ID waits for a click on any item. The user can
+  also uncheck one of your done items, to tell you that it is not done.
+- After you act on a click, clear its mark with a command on the item, for
+  example `rexpad done 5`. Otherwise the next `rexpad wait` exits at once
+  for the same click.
+- `set` replaces every item and drops the user's marks. While a `wait`
+  runs, change the list with `add`, `edit`, `done`, and `rm`, not `set`.
+  Before a `set`, run `rexpad get --json` and act on each item that has
+  `"by": "user"`.
 
 ## End of a task
 
@@ -85,3 +115,5 @@ when you start unrelated work (then `set` the new plan instead).
 - Outside Rex (`$REX_SERVER` unset), `show` fails with a message. The list
   commands still work; skip the pane.
 - The pane's process is `rexpad view`; pressing `q` in it closes the viewer.
+- If the user wants a pane that ignores clicks, run `rexpad hide`, then
+  `rexpad show --no-click`. `show` does nothing while the pane is open.

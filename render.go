@@ -9,7 +9,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"golang.org/x/image/font"
 	"golang.org/x/image/math/fixed"
 	"golang.org/x/image/vector"
 )
@@ -18,11 +17,6 @@ import (
 // screenshot of a Things-style project list). Every vertical position is
 // relative to the center line of the row it belongs to.
 const (
-	fontSize = 14.0
-	// Apple's SF Pro tracking at 14pt is -0.154pt; the static fonts don't
-	// apply it on their own.
-	tracking = -0.011 // em
-
 	// No padding of its own: the margins are just enough that the active
 	// row's highlight (activeInset past the content) meets the pane's edges.
 	marginLeft  = activeInset
@@ -158,6 +152,9 @@ type renderer struct {
 	// is and how open it is, for collapsing; geoH is the content height then.
 	geo  []rowGeo
 	geoH float64
+	// glyphRas and glyphMask are reused for every glyph drawn.
+	glyphRas  *vector.Rasterizer
+	glyphMask image.Alpha
 	// ring is the current match's outline, drawn over the rows where it is
 	// on its way to; nil draws none.
 	ring *ringGeo
@@ -304,6 +301,39 @@ func layoutOpen(l *List, open []float64) (rows []row, height float64) {
 		}
 	}
 	return rows, bottom
+}
+
+// boxHitRight is the right edge of the strip where a click toggles an
+// item: the checkbox column, out to halfway between the box and the text.
+const boxHitRight = marginLeft + (boxCenter+boxSize/2+textX)/2
+
+// hitItem is the item whose checkbox column holds the point (x, y), in
+// content points, or nil. geo, when it has a row for each row, is where
+// the rows are drawn while they fold; a click cannot hit a row that is not fully open.
+func hitItem(l *List, geo []rowGeo, x, y float64) *Item {
+	if x < 0 || x >= boxHitRight {
+		return nil
+	}
+	rows, _ := layout(l)
+	if len(geo) != len(rows) {
+		geo = nil // Render draws the resting layout then, so the click hits it too
+	}
+	for i, rw := range rows {
+		if rw.kind != rowItem {
+			continue
+		}
+		center := rw.center
+		if geo != nil {
+			if geo[i].open < 1 {
+				continue
+			}
+			center = geo[i].center
+		}
+		if y >= center-itemPitch/2 && y < center+itemPitch/2+rw.extra {
+			return rw.item
+		}
+	}
+	return nil
 }
 
 // followOffset is the scroll offset, in points, that keeps the first active
@@ -481,9 +511,8 @@ func (r *renderer) text(img *image.RGBA, s string, x, y float64, bold bool, col 
 // byte ranges of s; a match cut off by the ellipsis highlights the ellipsis.
 // (The current match is marked by an outline around its row, not here.)
 func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool, col color.RGBA, maxW float64, marks []span) (float64, bool) {
-	face := r.fonts.face(bold, fontSize*r.scale)
-	track := tracking * fontSize * r.scale
 	s, kept, truncated := r.fit(s, bold, maxW)
+	run := r.layout(s, bold)
 
 	// Highlights, mapped onto the drawn string, filled as one path so
 	// neighbors that touch don't darken where they overlap.
@@ -496,29 +525,16 @@ func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool
 		if a >= b {
 			continue
 		}
-		x0 := x + r.measure(face, s[:a], track)/r.scale - 1
-		x1 := x + r.measure(face, s[:b], track)/r.scale + 1
+		x0 := x + r.xAt(s, run, a)/r.scale - 1
+		x1 := x + r.xAt(s, run, b)/r.scale + 1
 		cy := y - baselineOffset
 		hl.poly(roundRect(x0, cy-9, x1, cy+9, 3))
 	}
 	hl.fill(r.tint(0.38))
 
-	src := image.NewUniform(col)
-	dot := fixed.Point26_6{X: fixed.Int26_6(x * r.scale * 64), Y: fixed.Int26_6(math.Round(y*r.scale) * 64)}
-	start := dot.X
-	prev := rune(-1)
-	for _, c := range s {
-		if prev >= 0 {
-			dot.X += face.Kern(prev, c)
-		}
-		dr, mask, mp, adv, ok := face.Glyph(dot, c)
-		if ok {
-			draw.DrawMask(img, dr, src, image.Point{}, mask, mp, draw.Over)
-		}
-		dot.X += adv + fixed.Int26_6(track*64)
-		prev = c
-	}
-	return float64(dot.X-start) / 64 / r.scale, truncated
+	origin := fixed.Point26_6{X: fixed.Int26_6(x * r.scale * 64), Y: fixed.Int26_6(math.Round(y*r.scale) * 64)}
+	r.drawRun(img, run, origin, col)
+	return float64(run.width) / 64 / r.scale, truncated
 }
 
 // fit is s as drawn in maxW points (no limit when maxW <= 0): cut with an
@@ -526,16 +542,16 @@ func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool
 // ellipsis.
 func (r *renderer) fit(s string, bold bool, maxW float64) (shown string, kept int, truncated bool) {
 	s = strings.ReplaceAll(s, "\t", " ") // fonts have no tab glyph
-	face := r.fonts.face(bold, fontSize*r.scale)
-	track := tracking * fontSize * r.scale
-	if maxW <= 0 || r.measure(face, s, track) <= maxW*r.scale {
+	run := r.layout(s, bold)
+	if maxW <= 0 || float64(run.width)/64 <= maxW*r.scale {
 		return s, len(s), false
 	}
+	s = s[:r.longestCandidate(s, run, maxW*r.scale)]
 	const ell = "…"
 	for len(s) > 0 {
 		_, size := utf8.DecodeLastRuneInString(s)
 		s = s[:len(s)-size]
-		if r.measure(face, trimRight(s)+ell, track) <= maxW*r.scale {
+		if r.measure(trimRight(s)+ell, bold) <= maxW*r.scale {
 			break
 		}
 	}
@@ -543,24 +559,37 @@ func (r *renderer) fit(s string, bold bool, maxW float64) (shown string, kept in
 	return s + ell, len(s), true
 }
 
+// longestCandidate is where fit starts cutting s, in bytes. Once a rune
+// starts past limit, every longer prefix is too wide, so fit only needs to
+// try the prefixes up to that rune instead of shaping one per rune from the
+// end. It keeps that rune too, because fit drops a rune before each try.
+func (r *renderer) longestCandidate(s string, run textRun, limit float64) int {
+	for _, g := range run.glyphs {
+		if float64(g.x)/64 < limit {
+			continue
+		}
+		cut := runeOffset(s, g.cluster)
+		_, size := utf8.DecodeRuneInString(s[cut:])
+		return cut + size
+	}
+	return len(s)
+}
+
+// runeOffset is the byte offset of rune n in s.
+func runeOffset(s string, n int) int {
+	for i := range s {
+		if n == 0 {
+			return i
+		}
+		n--
+	}
+	return len(s)
+}
+
 // textWidth is how wide fit's text is drawn, in points.
 func (r *renderer) textWidth(s string, bold bool, maxW float64) float64 {
 	shown, _, _ := r.fit(s, bold, maxW)
-	return r.measure(r.fonts.face(bold, fontSize*r.scale), shown, tracking*fontSize*r.scale) / r.scale
-}
-
-func (r *renderer) measure(face font.Face, s string, track float64) float64 {
-	var w fixed.Int26_6
-	prev := rune(-1)
-	for _, c := range s {
-		if prev >= 0 {
-			w += face.Kern(prev, c)
-		}
-		adv, _ := face.GlyphAdvance(c)
-		w += adv + fixed.Int26_6(track*64)
-		prev = c
-	}
-	return float64(w) / 64
+	return r.measure(shown, bold) / r.scale
 }
 
 func trimRight(s string) string {

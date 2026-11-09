@@ -21,21 +21,56 @@ import (
 )
 
 type viewOptions struct {
-	theme string  // terminal (follow the terminal's colors), light, or dark
-	scale float64 // device pixels per point; 0 picks from the cell size
+	theme   string  // terminal (follow the terminal's colors), light, or dark
+	scale   float64 // device pixels per point; 0 picks from the cell size
+	noClick bool    // clicks do not toggle items
 }
 
-type winSize struct{ rows, cols, xpix, ypix int }
+// clickedItem is the item whose box a click at pixel c is on, in the frame
+// drawn at scale and scrolled offsetPx down, with the rows where geo puts
+// them. The find bar covers the pane from viewPx down.
+func clickedItem(l *List, geo []rowGeo, c mouseClick, scale float64, offsetPx, viewPx int) *Item {
+	if c.y >= viewPx {
+		return nil
+	}
+	return hitItem(l, geo, float64(c.x)/scale, float64(c.y+offsetPx)/scale)
+}
+
+// clickTracker pairs a press with its release: a click toggles an item
+// only when the button goes down and comes up on the same item's box.
+type clickTracker struct{ pressed int }
+
+// add takes a press or release on item id (0 when it is on no box) and
+// returns the item to toggle, or 0.
+func (t *clickTracker) add(c mouseClick, id int) int {
+	if !c.release {
+		t.pressed = id
+		return 0
+	}
+	downOn := t.pressed
+	t.pressed = 0
+	if id != downOn {
+		return 0
+	}
+	return id
+}
+
+// winSize is the pane's size. guessed says the terminal reported no pixel
+// size, so xpix and ypix are made up.
+type winSize struct {
+	rows, cols, xpix, ypix int
+	guessed                bool
+}
 
 func getWinSize(fd int) winSize {
 	ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
 	if err != nil || ws.Row == 0 || ws.Col == 0 {
-		return winSize{rows: 24, cols: 80, xpix: 80 * 16, ypix: 24 * 34}
+		return winSize{rows: 24, cols: 80, xpix: 80 * 16, ypix: 24 * 34, guessed: true}
 	}
 	w := winSize{rows: int(ws.Row), cols: int(ws.Col), xpix: int(ws.Xpixel), ypix: int(ws.Ypixel)}
 	if w.xpix == 0 || w.ypix == 0 {
 		// No pixel size reported: assume a Retina cell.
-		w.xpix, w.ypix = w.cols*16, w.rows*34
+		w.xpix, w.ypix, w.guessed = w.cols*16, w.rows*34, true
 	}
 	return w
 }
@@ -247,13 +282,15 @@ func runView(name string, opt viewOptions) error {
 
 	w := bufio.NewWriterSize(out, 1<<16)
 	// Alternate screen, hidden cursor, color-scheme change reports (2031),
-	// mouse reports in SGR form (1000, 1006) so the wheel scrolls the list,
-	// bracketed paste (2004), and the kitty keyboard protocol's disambiguate
-	// flag (> 1 u) so Command and Option keys reach the find field.
-	fmt.Fprint(w, "\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J\x1b[?2031h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[>1u")
+	// mouse reports in SGR form (1000, 1006) so the wheel scrolls the list
+	// and clicks reach the checkboxes, with positions in pixels (1016) so a
+	// click lands on the right row, bracketed paste (2004), and the kitty
+	// keyboard protocol's disambiguate flag (> 1 u) so Command and Option
+	// keys reach the find field.
+	fmt.Fprint(w, "\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J\x1b[?2031h\x1b[?1000h\x1b[?1006h\x1b[?1016h\x1b[?2004h\x1b[>1u")
 	w.Flush()
 	defer func() {
-		fmt.Fprint(w, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[<u\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?2031l\x1b[?25h\x1b[?1049l")
+		fmt.Fprint(w, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[<u\x1b[?2004l\x1b[?1016l\x1b[?1006l\x1b[?1000l\x1b[?2031l\x1b[?25h\x1b[?1049l")
 		w.Flush()
 	}()
 
@@ -342,6 +379,7 @@ func runView(name string, opt viewOptions) error {
 		findFrom float64 // the view's top when the find started, in points
 		bar      sheet   // the find bar's image; valid while it's placed
 		listRows int     // rows the list's placement covers, under the bar
+		listPx   int     // and their height in pixels
 		lastFind string  // what the bar last showed, to skip redraws
 
 		// Collapsing: while find is open (and while the list folds back open
@@ -486,6 +524,7 @@ func runView(name string, opt viewOptions) error {
 			changed, listRows = true, rows
 		}
 		widthPx, viewPx := cellW*ws.cols, cellH*rows
+		listPx = viewPx
 		viewH = float64(viewPx) / scale
 		followTo, maxOff := followOffset(list, viewH)
 		maxOffset = maxOff
@@ -1107,7 +1146,39 @@ func runView(name string, opt viewOptions) error {
 		return false
 	}
 
+	// handleClick toggles an item when the button goes down and comes up on
+	// its box. Focus stays in this pane.
+	//
+	// Clicks work only once the terminal confirms that it reports pixels
+	// (mode 1016): a terminal that reports cells instead would put every
+	// click on the first rows. A made-up pixel size cannot be mapped either.
+	var clicks clickTracker
+	pixelReports := false
+	handleClick := func(c mouseClick) {
+		if opt.noClick || !pixelReports || lastSize.guessed {
+			return
+		}
+		it := clickedItem(list, geo, c, scale, int(math.Round(shown*scale)), listPx)
+		id := 0
+		if it != nil {
+			id = it.ID
+		}
+		if clicks.add(c, id) == 0 {
+			return
+		}
+		if err := toggleByUser(path, id, it.Status); err != nil {
+			// The pane has no room for a message: the bell says the
+			// click did not take, and the box shows it unchanged.
+			fmt.Fprint(w, "\a")
+		}
+		draw(false)
+	}
+
 	draw(true)
+	// Asked here, not with the modes above: the wait for the theme's colors
+	// reads and drops every other reply.
+	fmt.Fprint(w, "\x1b[?1016$p")
+	w.Flush()
 	tick := time.NewTicker(150 * time.Millisecond)
 	defer tick.Stop()
 	defer stopAnim()
@@ -1157,6 +1228,12 @@ func runView(name string, opt viewOptions) error {
 				}
 			case ev.scroll != scrollNone:
 				scrollBy(ev.scroll)
+			case ev.mode != nil:
+				if ev.mode.mode == 1016 {
+					pixelReports = ev.mode.on()
+				}
+			case ev.click != nil:
+				handleClick(*ev.click)
 			case ev.paste != "":
 				if find.input {
 					find.edit.paste(ev.paste)

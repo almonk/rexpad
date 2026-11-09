@@ -20,9 +20,10 @@ const usage = `rexpad: show an agent's todo list in a Rex pane (kitty graphics)
 Usage: rexpad [--list NAME] COMMAND [ARGS]
 
 Showing the list
-  show [--below] [--ratio PCT] [--theme T]   open the viewer beside your pane (30% by default, no focus change); idempotent
+  show [--below] [--ratio PCT] [--theme T] [--no-click]
+                                             open the viewer beside your pane (30% by default, no focus change); idempotent
   hide                                       close the viewer pane
-  view [--theme terminal|light|dark] [--scale N]
+  view [--theme terminal|light|dark] [--scale N] [--no-click]
                                              run the viewer in this terminal (/ finds, q quits)
   render -o FILE.png [--width PT] [--height PT] [--scale N] [--theme T]
                                              write a PNG of the list
@@ -43,6 +44,14 @@ Changing items
   rm ID...                      delete items
   progress GROUP PCT|auto       pin a group's ring fill (0-100), or go back to counting items
 
+Waiting for the user
+  In the viewer, the user clicks an item's box to mark it done, or open again.
+  The item then has "by": "user" (see get --json) until a command changes it.
+  --no-click on show or view turns clicks off.
+  wait [ID...]                  wait until one of the items (no ID: any item) has the
+                                user's mark, then print those items. A mark from before
+                                the wait counts too.
+
 Markdown checklist for set:
   # Group title
   - [ ] pending item
@@ -54,6 +63,9 @@ Agent skill
   skill show                    print the skill
 
 The list defaults to one per agent pane ($REX_BLOCK). Override with --list or $REXPAD_LIST.
+Settings: $REXPAD_FONT and $REXPAD_FONT_BOLD (font files), $REXPAD_FONT_SIZE (10 to 16 points),
+$REXPAD_TEXT_GAMMA (0.5 to 3; above 1 darkens text edges), $REXPAD_SCALE, $XDG_STATE_HOME.
+show passes them to the viewer pane.
 `
 
 var version = "0.1.0"
@@ -99,16 +111,9 @@ func run(args []string) error {
 	path := listPath(name)
 	cmd, args := rest[0], rest[1:]
 
-	// mutate loads the list, applies f, saves, and prints the result.
-	mutate := func(f func(l *List) error) error {
-		l, err := loadList(path)
-		if err != nil {
-			return err
-		}
-		if err := f(l); err != nil {
-			return err
-		}
-		return saveList(path, l)
+	mutate := func(f func(l *List) error) error { return updateList(path, f) }
+	replace := func(l *List) error {
+		return withListLock(path, func() error { return saveList(path, l) })
 	}
 	ids := func(args []string) ([]int, error) {
 		var out []int
@@ -132,7 +137,7 @@ func run(args []string) error {
 				if it == nil {
 					return fmt.Errorf("no item %d", n)
 				}
-				it.Status = st
+				it.setByCommand(st)
 			}
 			return nil
 		})
@@ -144,6 +149,7 @@ func run(args []string) error {
 		below := fs.Bool("below", false, "split below instead of right")
 		ratio := fs.Int("ratio", 30, "pane share of the split, percent")
 		theme := fs.String("theme", "terminal", "terminal (follow the Rex theme), light, or dark")
+		noClick := fs.Bool("no-click", false, "clicks do not toggle items")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
@@ -151,7 +157,14 @@ func run(args []string) error {
 		if *below {
 			split = "below"
 		}
-		return showPane(name, showOptions{split: split, ratio: *ratio, theme: *theme})
+		// The viewer loads the fonts too, but its pane shows only the
+		// picture, so warn here, where the caller sees it.
+		fonts, err := loadFonts()
+		if err != nil {
+			return err
+		}
+		printFontWarnings(fonts)
+		return showPane(name, showOptions{split: split, ratio: *ratio, theme: *theme, noClick: *noClick})
 
 	case "hide":
 		return hidePane(name)
@@ -160,10 +173,11 @@ func run(args []string) error {
 		fs := flag.NewFlagSet("view", flag.ContinueOnError)
 		theme := fs.String("theme", "terminal", "terminal (follow the Rex theme), light, or dark")
 		scale := fs.Float64("scale", 0, "device pixels per point (0: from the cell size)")
+		noClick := fs.Bool("no-click", false, "clicks do not toggle items")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
-		return runView(name, viewOptions{theme: *theme, scale: *scale})
+		return runView(name, viewOptions{theme: *theme, scale: *scale, noClick: *noClick})
 
 	case "render":
 		fs := flag.NewFlagSet("render", flag.ContinueOnError)
@@ -186,6 +200,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		printFontWarnings(fonts)
 		pal := lightPalette
 		if *theme == "dark" {
 			pal = darkPalette
@@ -230,7 +245,13 @@ func run(args []string) error {
 		} else if l, err = parseMarkdown(string(data)); err != nil {
 			return err
 		}
-		if err := saveList(path, l); err != nil {
+		// A new list is the agent's word on every item.
+		for gi := range l.Groups {
+			for ii := range l.Groups[gi].Items {
+				l.Groups[gi].Items[ii].By = ""
+			}
+		}
+		if err := replace(l); err != nil {
 			return err
 		}
 		fmt.Print(l.markdown(true))
@@ -255,7 +276,7 @@ func run(args []string) error {
 		return nil
 
 	case "clear":
-		return saveList(path, &List{NextID: 1})
+		return replace(&List{NextID: 1})
 
 	case "path":
 		fmt.Println(path)
@@ -341,13 +362,13 @@ func run(args []string) error {
 				for gi := range l.Groups {
 					for ii := range l.Groups[gi].Items {
 						if it := &l.Groups[gi].Items[ii]; it.Status == StatusActive {
-							it.Status = StatusPending
+							it.setByCommand(StatusPending)
 						}
 					}
 				}
 			}
 			for _, n := range ns {
-				l.find(n).Status = StatusActive
+				l.find(n).setByCommand(StatusActive)
 			}
 			return nil
 		})
@@ -360,7 +381,7 @@ func run(args []string) error {
 			for gi := range l.Groups {
 				for ii := range l.Groups[gi].Items {
 					if it := &l.Groups[gi].Items[ii]; it.Status == StatusActive {
-						it.Status = StatusDone
+						it.setByCommand(StatusDone)
 					}
 				}
 			}
@@ -373,14 +394,14 @@ func run(args []string) error {
 			for gi := range l.Groups {
 				for ii := range l.Groups[gi].Items {
 					if it := &l.Groups[gi].Items[ii]; it.Status == StatusActive {
-						it.Status = StatusDone
+						it.setByCommand(StatusDone)
 					}
 				}
 			}
 			for gi := range l.Groups {
 				for ii := range l.Groups[gi].Items {
 					if it := &l.Groups[gi].Items[ii]; it.Status == StatusPending && started == nil {
-						it.Status = StatusActive
+						it.setByCommand(StatusActive)
 						started = it
 					}
 				}
@@ -395,6 +416,21 @@ func run(args []string) error {
 			}
 		}
 		return err
+
+	case "wait":
+		ns, err := ids(args)
+		if err != nil {
+			return err
+		}
+		if _, open := viewerOpen(name); !open {
+			fmt.Fprintln(os.Stderr, "rexpad: no viewer pane is open for this list, so the user has no box to click; run rexpad show")
+		}
+		l, err := waitForUser(path, ns, waitPoll)
+		if err != nil {
+			return err
+		}
+		fmt.Print(l.markdown(true))
+		return nil
 
 	case "undo", "uncheck":
 		return setStatus(args, StatusPending)
@@ -412,7 +448,7 @@ func run(args []string) error {
 			if it == nil {
 				return fmt.Errorf("no item %d", ns[0])
 			}
-			it.Text = strings.Join(args[1:], " ")
+			it.editByCommand(strings.Join(args[1:], " "))
 			return nil
 		})
 

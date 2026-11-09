@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/zlib"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
@@ -13,10 +14,15 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/image/font/gofont/goregular"
+	"golang.org/x/image/font/sfnt"
 )
 
 const sample = `# Investigate the crash
@@ -1071,8 +1077,13 @@ func TestDotsFollowTheText(t *testing.T) {
 }
 
 func TestItemsWrap(t *testing.T) {
-	fonts, _ := loadFonts()
-	r := &renderer{fonts: fonts, scale: 2, pal: lightPalette}
+	for _, scale := range []float64{1, 2} {
+		t.Run(fmt.Sprint(scale, "x"), func(t *testing.T) { testItemsWrap(t, scale) })
+	}
+}
+
+func testItemsWrap(t *testing.T, scale float64) {
+	r := &renderer{fonts: testFonts(t), scale: scale, pal: lightPalette}
 	text := "Order the CNC cells and conveyors before the steel frame goes up"
 	maxW := 160.0
 	starts := r.wrapText(text, maxW)
@@ -1169,5 +1180,891 @@ func TestFindHighlightsOnWrappedLines(t *testing.T) {
 		if line(i) != (i == at) {
 			t.Errorf("line %d (%q) changed: %v; only line %d should", i, lines[i], line(i), at)
 		}
+	}
+}
+
+func TestViewerCommandCarriesCallerSettings(t *testing.T) {
+	t.Setenv("REXPAD_FONT", "/fonts/Mono Regular.otf")
+	t.Setenv("REXPAD_FONT_BOLD", "")
+	t.Setenv("REXPAD_SCALE", "2")
+	t.Setenv("XDG_STATE_HOME", "/state")
+	t.Setenv("REX_BLOCK", "")
+	got := viewerCommand("/bin/rexpad", "l", showOptions{theme: "dark"})
+	want := []string{"/usr/bin/env", "REXPAD_FONT=/fonts/Mono Regular.otf", "REXPAD_SCALE=2", "XDG_STATE_HOME=/state",
+		"/bin/rexpad", "view", "--list", "l", "--theme", "dark"}
+	if !slices.Equal(got, want) {
+		t.Errorf("viewerCommand = %q\nwant %q", got, want)
+	}
+}
+
+func TestViewerCommandWithoutSettings(t *testing.T) {
+	for _, k := range viewerSettings {
+		t.Setenv(k, "")
+	}
+	t.Setenv("REX_BLOCK", "")
+	got := viewerCommand("/bin/rexpad", "l", showOptions{theme: "terminal"})
+	want := []string{"/bin/rexpad", "view", "--list", "l", "--theme", "terminal"}
+	if !slices.Equal(got, want) {
+		t.Errorf("viewerCommand = %q\nwant %q", got, want)
+	}
+}
+
+func TestShowPaneStartsViewerWithCallerSettings(t *testing.T) {
+	bin := t.TempDir()
+	argsFile := filepath.Join(bin, "args")
+	fakeRex := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\necho block-1\n"
+	if err := os.WriteFile(filepath.Join(bin, "rex"), []byte(fakeRex), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REX_SERVER", "test")
+	t.Setenv("REX_BLOCK", "") // one rex call: no block move afterwards
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_SCALE", "2")
+	if err := showPane("l", showOptions{split: "right", ratio: 30, theme: "dark"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, _ := os.Executable()
+	want := strings.Join(viewerCommand(self, "l", showOptions{split: "right", ratio: 30, theme: "dark"}), "\n")
+	if !strings.HasSuffix(strings.TrimSpace(string(got)), "\n--\n"+want) {
+		t.Errorf("rex split argv:\n%s\nwant it to end with:\n--\n%s", got, want)
+	}
+}
+
+// A setting the viewer reads but show doesn't pass on is silently lost in
+// the pane, so every environment read outside show must be in viewerSettings.
+func TestViewerSettingsCoverEveryEnvRead(t *testing.T) {
+	passedAnotherWay := map[string]bool{
+		"REXPAD_LIST": true, "REX_BLOCK": true, // show passes --list
+		"REX_SERVER": true, // read only by show
+	}
+	// Any quoted setting name counts, so a read through a helper is found too.
+	getenv := regexp.MustCompile(`"((?:REXPAD|XDG)_[A-Z_]+)"`)
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || f == "pane.go" {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range getenv.FindAllStringSubmatch(string(src), -1) {
+			if key := m[1]; !passedAnotherWay[key] && !slices.Contains(viewerSettings, key) {
+				t.Errorf("%s reads $%s, which show does not pass to the viewer", f, key)
+			}
+		}
+	}
+}
+
+// fontFile writes Go's bundled regular font to a file, as a stand-in for a
+// font the user names in $REXPAD_FONT.
+func fontFile(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "font.ttf")
+	if err := os.WriteFile(p, goregular.TTF, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// clearTextSettings keeps a developer's own $REXPAD_* values out of a test.
+func clearTextSettings(t *testing.T) {
+	for _, k := range []string{"REXPAD_FONT", "REXPAD_FONT_BOLD", "REXPAD_FONT_SIZE", "REXPAD_TEXT_GAMMA"} {
+		t.Setenv(k, "")
+	}
+}
+
+func mustLoadFonts(t *testing.T) *fontSet {
+	t.Helper()
+	fonts, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fonts
+}
+
+func testFonts(t *testing.T) *fontSet {
+	t.Helper()
+	clearTextSettings(t)
+	return mustLoadFonts(t)
+}
+
+// installedFont is the first of paths that exists, or skips the test: some
+// checks need a font with real shaping features, which the bundled Go fonts
+// don't have.
+func installedFont(t *testing.T, paths ...string) string {
+	t.Helper()
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	t.Skipf("none of these fonts is installed: %v", paths)
+	return ""
+}
+
+// ink is how much alpha img holds in total, and the box around it.
+func ink(img *image.RGBA) (sum int, box image.Rectangle) {
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if a := img.RGBAAt(x, y).A; a > 0 {
+				sum += int(a)
+				box = box.Union(image.Rect(x, y, x+1, y+1))
+			}
+		}
+	}
+	return sum, box
+}
+
+// drawText draws s alone on a transparent image and returns the image.
+func drawText(r *renderer, s string, x float64, bold bool) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, 400, 80))
+	r.text(img, s, x, 40, bold, color.RGBA{A: 255}, 0)
+	return img
+}
+
+func TestFontSettingsDefaults(t *testing.T) {
+	fonts := testFonts(t)
+	if fonts.size != 14 || fonts.regular.tracking != -0.011 || fonts.edge != nil || len(fonts.warnings) > 0 {
+		t.Errorf("size %v, tracking %v, edge set %v, warnings %q; want 14, -0.011, false, none",
+			fonts.size, fonts.regular.tracking, fonts.edge != nil, fonts.warnings)
+	}
+}
+
+func TestFontSettingsFromEnvironment(t *testing.T) {
+	clearTextSettings(t)
+	t.Setenv("REXPAD_FONT", fontFile(t))
+	t.Setenv("REXPAD_FONT_SIZE", "12")
+	t.Setenv("REXPAD_TEXT_GAMMA", "1.4")
+	fonts := mustLoadFonts(t)
+	// SF Pro's tracking is wrong for any other font.
+	if fonts.size != 12 || fonts.regular.tracking != 0 || len(fonts.warnings) > 0 {
+		t.Errorf("size %v, tracking %v, warnings %q; want 12, 0, none", fonts.size, fonts.regular.tracking, fonts.warnings)
+	}
+	if fonts.edge == nil || fonts.edge[0] != 0 || fonts.edge[255] != 255 || fonts.edge[128] <= 128 {
+		t.Errorf("gamma 1.4 should darken edges and keep 0 and 255: %v", fonts.edge)
+	}
+}
+
+func TestFontSettingsIgnoreBadValues(t *testing.T) {
+	junk := filepath.Join(t.TempDir(), "junk.otf")
+	if err := os.WriteFile(junk, []byte("not a font"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ font, size, gamma string }{
+		{junk, "-3", "dark"},
+		{"/no/such/font.otf", "17", "3.5"}, // past the caps
+		{junk, "9.5", "0.4"},
+	} {
+		clearTextSettings(t)
+		t.Setenv("REXPAD_FONT", c.font)
+		t.Setenv("REXPAD_FONT_SIZE", c.size)
+		t.Setenv("REXPAD_TEXT_GAMMA", c.gamma)
+		fonts := mustLoadFonts(t)
+		if fonts.size != 14 || fonts.regular.tracking != -0.011 || fonts.edge != nil {
+			t.Errorf("%+v: size %v, tracking %v, edge set %v; want the defaults", c, fonts.size, fonts.regular.tracking, fonts.edge != nil)
+		}
+		if len(fonts.warnings) != 1 || !strings.Contains(fonts.warnings[0], c.font) {
+			t.Errorf("%+v: warnings %q, want one that names the font", c, fonts.warnings)
+		}
+	}
+}
+
+func TestFontLoadsFromACollection(t *testing.T) {
+	clearTextSettings(t)
+	t.Setenv("REXPAD_FONT", installedFont(t, "/System/Library/Fonts/Menlo.ttc", "/System/Library/Fonts/Courier.ttc"))
+	fonts := mustLoadFonts(t)
+	if fonts.regular.tracking != 0 || len(fonts.warnings) > 0 {
+		t.Errorf("tracking %v, warnings %q: the .ttc was not used", fonts.regular.tracking, fonts.warnings)
+	}
+}
+
+func TestTextSnapsToWholePixelsBelow2x(t *testing.T) {
+	fonts := testFonts(t)
+	whole := func(scale float64) bool {
+		run := (&renderer{fonts: fonts, scale: scale}).layout("Review the patch, then open the PR", false)
+		for _, g := range run.glyphs {
+			if g.x%64 != 0 {
+				return false
+			}
+		}
+		return run.width%64 == 0
+	}
+	if !whole(1) {
+		t.Error("at 1x every glyph should start on a whole pixel")
+	}
+	if whole(2) {
+		t.Error("at 2x glyphs keep their fractional positions, as the design has them")
+	}
+}
+
+func TestTextStartsOnAWholePixelBelow2x(t *testing.T) {
+	r := &renderer{fonts: testFonts(t), scale: 1}
+	imgA := drawText(r, "a", 10.3, false)
+	_, a := ink(imgA)
+	imgB := drawText(r, "a", 10.7, false)
+	_, b := ink(imgB)
+	if a.Size() != b.Size() {
+		t.Fatalf("ink boxes %v and %v differ in size", a, b)
+	}
+	for y := 0; y < a.Dy(); y++ {
+		for x := 0; x < a.Dx(); x++ {
+			pa := imgA.RGBAAt(a.Min.X+x, a.Min.Y+y)
+			pb := imgB.RGBAAt(b.Min.X+x, b.Min.Y+y)
+			if pa != pb {
+				t.Fatalf("the same letter drew differently at x=10.3 and x=10.7 (%v vs %v at %d,%d)", pa, pb, x, y)
+			}
+		}
+	}
+}
+
+func TestLayoutGlyphsMatchTheFont(t *testing.T) {
+	clearTextSettings(t)
+	t.Setenv("REXPAD_FONT", fontFile(t))
+	fonts := mustLoadFonts(t)
+	const s = "Ship it"
+	run := (&renderer{fonts: fonts, scale: 2}).layout(s, false)
+	var buf sfnt.Buffer
+	var want []sfnt.GlyphIndex
+	for _, c := range s {
+		id, _ := fonts.regular.outlines.GlyphIndex(&buf, c)
+		want = append(want, id)
+	}
+	var got []sfnt.GlyphIndex
+	for _, g := range run.glyphs {
+		got = append(got, g.id)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("shaped glyphs %v, want the font's own %v", got, want)
+	}
+}
+
+func TestMeasureMatchesDrawnText(t *testing.T) {
+	fonts := testFonts(t)
+	for _, scale := range []float64{1, 2} {
+		r := &renderer{fonts: fonts, scale: scale, pal: lightPalette}
+		img := image.NewRGBA(image.Rect(0, 0, 800, 100))
+		const s = "Wrap long items, and refresh the README"
+		drawn, _ := r.text(img, s, 10, 40, false, lightPalette.text, 0)
+		if measured := r.measure(s, false) / scale; measured != drawn {
+			t.Errorf("at %vx: measured %v points, drew %v", scale, measured, drawn)
+		}
+	}
+}
+
+func TestFontSizeChangesText(t *testing.T) {
+	sized := func(size string) (width float64, height int) {
+		clearTextSettings(t)
+		t.Setenv("REXPAD_FONT_SIZE", size)
+		r := &renderer{fonts: mustLoadFonts(t), scale: 2}
+		_, box := ink(drawText(r, "H", 10, false))
+		return r.measure("Ship it", false), box.Dy()
+	}
+	w12, h12 := sized("12")
+	w14, h14 := sized("14")
+	if w12 >= w14 || h12 >= h14 {
+		t.Errorf("12pt text is %vpx wide and %vpx tall, 14pt is %v and %v; want 12pt smaller in both", w12, h12, w14, h14)
+	}
+}
+
+func TestTextGammaDarkensEdges(t *testing.T) {
+	fonts := testFonts(t)
+	r := &renderer{fonts: fonts, scale: 1}
+	plain, _ := ink(drawText(r, "o", 10, false))
+	fonts.edge = edgeCurve(2)
+	darker, _ := ink(drawText(r, "o", 10, false))
+	if darker <= plain {
+		t.Errorf("ink with gamma 2 is %d, without %d; want more", darker, plain)
+	}
+}
+
+func TestBoldTextUsesBoldOutlines(t *testing.T) {
+	r := &renderer{fonts: testFonts(t), scale: 2}
+	regular, _ := ink(drawText(r, "Plan", 10, false))
+	bold, _ := ink(drawText(r, "Plan", 10, true))
+	if bold <= regular*11/10 {
+		t.Errorf("bold ink %d is not clearly more than regular %d", bold, regular)
+	}
+}
+
+func TestShapingKernsWithSFPro(t *testing.T) {
+	clearTextSettings(t)
+	t.Setenv("REXPAD_FONT", installedFont(t, "/Library/Fonts/SF-Pro-Text-Regular.otf",
+		filepath.Join(os.Getenv("HOME"), "Library/Fonts/SF-Pro-Text-Regular.otf")))
+	r := &renderer{fonts: mustLoadFonts(t), scale: 2}
+	if pair, apart := r.measure("AV", false), r.measure("A", false)+r.measure("V", false); pair >= apart {
+		t.Errorf(`"AV" is %vpx, "A" and "V" apart %vpx; the kerning pair was not applied`, pair, apart)
+	}
+	// A find highlight that starts at V starts where V is drawn.
+	run := r.layout("AV", false)
+	if x := r.xAt("AV", run, 1); x != float64(run.glyphs[1].x)/64 || x >= r.measure("A", false) {
+		t.Errorf("x of V is %v, glyph at %v, A alone %v", x, float64(run.glyphs[1].x)/64, r.measure("A", false))
+	}
+}
+
+func TestShapingHealsTextureWithMonaspace(t *testing.T) {
+	clearTextSettings(t)
+	home := os.Getenv("HOME")
+	t.Setenv("REXPAD_FONT", installedFont(t,
+		filepath.Join(home, "Library/Fonts/MonaspaceArgon-Regular.otf"),
+		"/Library/Fonts/MonaspaceArgon-Regular.otf",
+		"/usr/share/fonts/opentype/monaspace/MonaspaceArgon-Regular.otf"))
+	r := &renderer{fonts: mustLoadFonts(t), scale: 2}
+	alone := r.layout("m", false).glyphs[0].id
+	if healed := r.layout("mil", false).glyphs[0].id; healed == alone {
+		t.Errorf(`"m" before "il" is glyph %d, the same as alone; contextual alternates were not applied`, healed)
+	}
+}
+
+// fitByShortening is the plain way to fit s: drop a rune at a time until the
+// rest and an ellipsis fit.
+func fitByShortening(r *renderer, s string, bold bool, maxW float64) (string, int, bool) {
+	if r.measure(s, bold) <= maxW*r.scale {
+		return s, len(s), false
+	}
+	for len(s) > 0 {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+		if r.measure(trimRight(s)+"…", bold) <= maxW*r.scale {
+			break
+		}
+	}
+	s = trimRight(s)
+	return s + "…", len(s), true
+}
+
+func TestFitMatchesShortening(t *testing.T) {
+	fonts := testFonts(t)
+	texts := []string{
+		"Order the CNC cells and conveyors before the steel frame goes up",
+		"Review the patch, then open the PR on almonk/rexpad",
+		"naïve café — straße, 日本語 mixed in",
+	}
+	for _, scale := range []float64{1, 2} {
+		r := &renderer{fonts: fonts, scale: scale}
+		for _, s := range texts {
+			for _, maxW := range []float64{20, 60, 133.3, 250, 1000} {
+				shown, kept, cut := r.fit(s, false, maxW)
+				wShown, wKept, wCut := fitByShortening(r, s, false, maxW)
+				if shown != wShown || kept != wKept || cut != wCut {
+					t.Errorf("%vx, %q in %vpt: fit gave %q %d %v, want %q %d %v", scale, s, maxW, shown, kept, cut, wShown, wKept, wCut)
+				}
+			}
+		}
+	}
+}
+
+func TestXAtMatchesTheRun(t *testing.T) {
+	r := &renderer{fonts: testFonts(t), scale: 1}
+	const s = "Ship it…"
+	run := r.layout(s, false)
+	for i, g := range run.glyphs {
+		at := len(string([]rune(s)[:i]))
+		if x := r.xAt(s, run, at); x != float64(g.x)/64 {
+			t.Errorf("x at byte %d is %v, glyph %d is at %v", at, x, i, float64(g.x)/64)
+		}
+	}
+	if x := r.xAt(s, run, len(s)); x != float64(run.width)/64 {
+		t.Errorf("x at the end is %v, the run is %v wide", x, float64(run.width)/64)
+	}
+}
+
+// stderrOf runs f and returns what it wrote to stderr.
+func stderrOf(t *testing.T, f func() error) string {
+	t.Helper()
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = write
+	runErr := f()
+	os.Stderr = saved
+	write.Close()
+	out, _ := io.ReadAll(read)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	return string(out)
+}
+
+func TestShowAndRenderWarnAboutAnUnusableFont(t *testing.T) {
+	clearTextSettings(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "w")
+	t.Setenv("REXPAD_FONT", "/no/such/font.otf")
+	if err := run([]string{"add", "an item"}); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "rex"), []byte("#!/bin/sh\necho block-1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REX_SERVER", "test")
+	t.Setenv("REX_BLOCK", "")
+	png := filepath.Join(t.TempDir(), "list.png")
+	for _, args := range [][]string{{"render", "-o", png}, {"show"}} {
+		if got := stderrOf(t, func() error { return run(args) }); !strings.Contains(got, "/no/such/font.otf") {
+			t.Errorf("%v wrote %q to stderr, want a warning that names the font", args, got)
+		}
+	}
+}
+
+func TestConcurrentAddsKeepEveryItem(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "race")
+	const writers = 40
+	errs := make(chan error, writers)
+	for i := range writers {
+		go func() { errs <- run([]string{"add", fmt.Sprint("item ", i)}) }()
+	}
+	for range writers {
+		if err := <-errs; err != nil {
+			t.Errorf("add: %v", err)
+		}
+	}
+	l, err := loadList(listPath("race"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(l.Groups[0].Items); n != writers {
+		t.Errorf("the list kept %d of %d items: concurrent writes lost updates", n, writers)
+	}
+}
+
+func TestToggleByUser(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path := listPath("toggle")
+	saveMarkdown(t, path, "- [ ] pending {#1}\n- [~] active {#2}\n- [x] done {#3}\n")
+	want := map[int]Status{1: StatusDone, 2: StatusDone, 3: StatusPending}
+	for id, shown := range map[int]Status{1: StatusPending, 2: StatusActive, 3: StatusDone} {
+		if err := toggleByUser(path, id, shown); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l := mustLoad(t, path)
+	for id, st := range want {
+		if it := l.find(id); it.Status != st || it.By != byUser {
+			t.Errorf("item %d = %s by %q, want %s by %q", id, it.Status, it.By, st, byUser)
+		}
+	}
+	// The click toggles what the viewer showed, even if the file moved on.
+	if err := toggleByUser(path, 1, StatusPending); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ = loadList(path); l.find(1).Status != StatusDone {
+		t.Errorf("a click on a box shown open made it %s, want done", l.find(1).Status)
+	}
+	if err := toggleByUser(path, 99, StatusPending); err == nil {
+		t.Error("toggling a missing item should fail")
+	}
+}
+
+func TestCommandsClearTheUserMark(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "marks")
+	path := listPath("marks")
+	reset := func() {
+		t.Helper()
+		l, _ := parseMarkdown("- [ ] one {#1}\n- [~] two {#2}\n- [x] three {#3}\n")
+		for _, g := range l.Groups {
+			for i := range g.Items {
+				g.Items[i].By = byUser
+			}
+		}
+		if err := saveList(path, l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := [][]string{
+		{"done", "1"}, {"undo", "1"}, {"start", "1"}, {"edit", "1", "new text"},
+		{"done"}, {"next"}, {"set"},
+	}
+	for _, args := range cases {
+		reset()
+		if args[0] == "set" {
+			// set replaces every item, even with the same text and status.
+			out, _ := json.Marshal(mustLoad(t, path))
+			withStdin(t, string(out), func() { captureStdout(t, func() { mustRun(t, "set", "--json") }) })
+		} else {
+			captureStdout(t, func() { mustRun(t, args...) })
+		}
+		l := mustLoad(t, path)
+		for _, g := range l.Groups {
+			for _, it := range g.Items {
+				touched := args[0] == "set" ||
+					(args[0] == "next" && it.ID <= 2) || // finishes 2, starts 1
+					(len(args) > 1 && it.ID == 1) ||
+					(args[0] == "start" && it.ID == 2) || // demoted to pending
+					(args[0] == "done" && len(args) == 1 && it.ID == 2)
+				if touched && it.By != "" {
+					t.Errorf("%v: item %d kept by %q", args, it.ID, it.By)
+				}
+				if !touched && it.By != byUser {
+					t.Errorf("%v: item %d lost the user's mark", args, it.ID)
+				}
+			}
+		}
+	}
+}
+
+func TestGetShowsTheUserMarkOnlyInJSON(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "get")
+	path := listPath("get")
+	saveMarkdown(t, path, "- [ ] one {#1}\n")
+	if err := toggleByUser(path, 1, StatusPending); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureStdout(t, func() { mustRun(t, "get") }); got != "- [x] one {#1}\n" {
+		t.Errorf("get = %q", got)
+	}
+	if got := captureStdout(t, func() { mustRun(t, "get", "--json") }); !strings.Contains(got, `"by": "user"`) {
+		t.Errorf("get --json has no by field:\n%s", got)
+	}
+}
+
+func mustRun(t *testing.T, args ...string) {
+	t.Helper()
+	if err := run(args); err != nil {
+		t.Fatalf("%v: %v", args, err)
+	}
+}
+
+func mustLoad(t *testing.T, path string) *List {
+	t.Helper()
+	l, err := loadList(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// saveMarkdown writes the checklist md as the list at path.
+func saveMarkdown(t *testing.T, path, md string) {
+	t.Helper()
+	l, err := parseMarkdown(md)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveList(path, l); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// captureStdout runs fn and returns what it printed.
+func captureStdout(t *testing.T, fn func()) string { return capture(t, &os.Stdout, fn) }
+
+// capture runs fn and returns what it wrote to *f, such as os.Stderr.
+func capture(t *testing.T, f **os.File, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := *f
+	*f = w
+	defer func() { *f = old }()
+	fn()
+	w.Close()
+	out, _ := io.ReadAll(r)
+	return string(out)
+}
+
+// withStdin runs fn with input on stdin.
+func withStdin(t *testing.T, input string, fn func()) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(input)
+	f.Seek(0, 0)
+	old := os.Stdin
+	os.Stdin = f
+	defer func() { os.Stdin = old; f.Close() }()
+	fn()
+}
+
+func TestWaitForUserReturnsMarkedItems(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path := listPath("wait")
+	saveMarkdown(t, path, "# Mine\n- [ ] agent's {#1}\n# Yours\n- [ ] log in {#2}\n- [ ] approve {#3}\n")
+	// A click before the wait starts still counts: an agent cannot start
+	// waiting at the same instant it adds the step.
+	if err := toggleByUser(path, 2, StatusPending); err != nil {
+		t.Fatal(err)
+	}
+	got, err := waitForUser(path, nil, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md := got.markdown(true); md != "# Yours\n- [x] log in {#2}\n" {
+		t.Errorf("wait printed %q", md)
+	}
+
+	// With IDs, only those items count.
+	start := time.Now()
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		toggleByUser(path, 3, StatusPending)
+	}()
+	got, err = waitForUser(path, []int{1, 3}, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md := got.markdown(true); md != "# Yours\n- [x] approve {#3}\n" {
+		t.Errorf("wait 1 3 printed %q", md)
+	}
+	if time.Since(start) < 40*time.Millisecond {
+		t.Error("wait 1 3 returned before the user changed 1 or 3")
+	}
+}
+
+func TestWaitForUserFailsOnMissingItems(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path := listPath("waitgone")
+	saveMarkdown(t, path, "- [ ] one {#1}\n- [ ] two {#2}\n")
+	if _, err := waitForUser(path, []int{9}, time.Millisecond); err == nil {
+		t.Error("wait on an item that does not exist should fail")
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		updateList(path, func(l *List) error { l.remove(2); return nil })
+	}()
+	done := make(chan error, 1)
+	go func() { _, err := waitForUser(path, []int{2}, time.Millisecond); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("wait should fail once its items are removed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait kept waiting on a removed item")
+	}
+}
+
+func TestWaitCommandPrintsTheGetFormat(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "waitcmd")
+	path := listPath("waitcmd")
+	saveMarkdown(t, path, "- [x] one {#1}\n")
+	if err := toggleByUser(path, 1, StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureStdout(t, func() { mustRun(t, "wait", "1") }); got != "- [ ] one {#1}\n" {
+		t.Errorf("wait printed %q", got)
+	}
+}
+
+func TestDecodeClicks(t *testing.T) {
+	var got []mouseClick
+	var d keyDecoder
+	d.feed([]byte("\x1b[I\x1b[<0;122;155M\x1b[<0;122;155m\x1b[<64;5;5M\x1b[<1;3;4M\x1b[<4;3;4M\x1b[<32;3;4M"), func(ev termEvent) {
+		if ev.click != nil {
+			got = append(got, *ev.click)
+		}
+	})
+	// Only plain left-button presses and releases: not the wheel, the
+	// middle button, Shift-click, or a drag.
+	want := []mouseClick{{x: 122, y: 155}, {x: 122, y: 155, release: true}}
+	if !slices.Equal(got, want) {
+		t.Errorf("clicks = %+v, want %+v", got, want)
+	}
+}
+
+// itemID is the item's ID, or 0 for no item.
+func itemID(it *Item) int {
+	if it == nil {
+		return 0
+	}
+	return it.ID
+}
+
+func TestHitItem(t *testing.T) {
+	l, _ := parseMarkdown("# G\n- [ ] a {#1}\n- [ ] b {#2}\n# H\n- [ ] c {#3}\n")
+	l.find(2).lines = []int{0, 1} // b wraps to two lines
+	rows, _ := layout(l)
+	center := map[int]float64{}
+	for _, rw := range rows {
+		if rw.kind == rowItem {
+			center[rw.item.ID] = rw.center
+		}
+	}
+	boxX := marginLeft + boxCenter
+	cases := []struct {
+		name string
+		x, y float64
+		want int
+	}{
+		{"on a box", boxX, center[1], 1},
+		{"at the pane's left edge", 0, center[3], 3},
+		{"near the top of the row", boxX, center[1] - itemPitch/2 + 1, 1},
+		{"in a wrapped item's second line", boxX, center[2] + lineH, 2},
+		{"on the text", marginLeft + textX + 4, center[1], 0},
+		{"on a group title", boxX, rows[0].center, 0},
+		{"between a title and its first item", boxX, rows[0].center + 16, 0},
+		{"below the list", boxX, center[3] + itemPitch, 0},
+	}
+	for _, c := range cases {
+		if got := itemID(hitItem(l, nil, c.x, c.y)); got != c.want {
+			t.Errorf("%s: hit %d, want %d", c.name, got, c.want)
+		}
+	}
+
+	// While find folds rows away, a click hits the row drawn there, and
+	// never one still folding.
+	geo, _ := geoFor(l, []bool{true, false, true, true, true})
+	if got := itemID(hitItem(l, geo, boxX, geo[2].center)); got != 2 {
+		t.Errorf("folded: hit %d where item 2 is drawn, want 2", got)
+	}
+	if got := itemID(hitItem(l, geo, boxX, center[1])); got == 1 {
+		t.Error("folded: hit item 1, which is folded away")
+	}
+	geo[4].open = 0.5
+	if got := itemID(hitItem(l, geo, boxX, geo[4].center)); got != 0 {
+		t.Errorf("hit item %d while it was still folding", got)
+	}
+}
+
+func TestClickedItemUsesTheFrameOnScreen(t *testing.T) {
+	l, _ := parseMarkdown("- [ ] a {#1}\n- [ ] b {#2}\n- [ ] c {#3}\n")
+	rows, _ := layout(l)
+	const scale = 2.0
+	boxPx := int((marginLeft + boxCenter) * scale)
+	at := func(id int) int { return int(rows[id-1].center * scale) }
+	if got := itemID(clickedItem(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, 0, 1000)); got != 2 {
+		t.Errorf("unscrolled: hit %d, want 2", got)
+	}
+	// Scrolled down one row: item 3 is drawn where item 2 was.
+	if got := itemID(clickedItem(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, int(itemPitch*scale), 1000)); got != 3 {
+		t.Errorf("scrolled: hit %d, want 3", got)
+	}
+	// The find bar covers the pane below viewPx.
+	if got := itemID(clickedItem(l, nil, mouseClick{x: boxPx, y: at(3)}, scale, 0, at(3)-10)); got != 0 {
+		t.Errorf("a click on the find bar hit item %d", got)
+	}
+}
+
+func TestViewArgs(t *testing.T) {
+	// A click keeps focus in the viewer's pane, so the agent's pane is not
+	// passed to the viewer.
+	t.Setenv("REX_BLOCK", "block:agent")
+	got := viewArgs("/bin/rexpad", "mylist", showOptions{theme: "dark"})
+	want := []string{"/bin/rexpad", "view", "--list", "mylist", "--theme", "dark"}
+	if !slices.Equal(got, want) {
+		t.Errorf("viewArgs = %q, want %q", got, want)
+	}
+	got = viewArgs("/bin/rexpad", "mylist", showOptions{theme: "dark", noClick: true})
+	want = []string{"/bin/rexpad", "view", "--list", "mylist", "--theme", "dark", "--no-click"}
+	if !slices.Equal(got, want) {
+		t.Errorf("viewArgs = %q, want %q", got, want)
+	}
+}
+
+func TestParseSGRMouseRejectsMalformedReports(t *testing.T) {
+	for _, in := range []string{"<0;12M", "<a;1;1M", "<0;1;1", "<0;1;1;9M", "<0;;1M", "0;1;1M"} {
+		if m, ok := parseSGRMouse(in); ok {
+			t.Errorf("parseSGRMouse(%q) = %+v, want no report", in, m)
+		}
+	}
+	if k := csiScroll("<64;5;5m"); k != scrollNone {
+		t.Errorf("a wheel release scrolled: %v", k)
+	}
+}
+
+func TestClickTrackerPairsPressAndRelease(t *testing.T) {
+	// Each step is a press (down) or a release (up) on an item's box, 0 for
+	// no box. want is what each step toggles.
+	down := func(id int) mouseClick { return mouseClick{x: id} }
+	up := func(id int) mouseClick { return mouseClick{x: id, release: true} }
+	cases := []struct {
+		name  string
+		steps []mouseClick
+		want  []int
+	}{
+		{"down and up on one box", []mouseClick{down(1), up(1)}, []int{0, 1}},
+		{"down on one box, up on another", []mouseClick{down(1), up(2)}, []int{0, 0}},
+		{"down off a box, up on one", []mouseClick{down(0), up(2)}, []int{0, 0}},
+		{"up with no press", []mouseClick{up(3)}, []int{0}},
+		{"a second press replaces the first", []mouseClick{down(1), down(2), up(2)}, []int{0, 0, 2}},
+		{"one press, two releases", []mouseClick{down(1), up(1), up(1)}, []int{0, 1, 0}},
+		{"a release off the box ends the press", []mouseClick{down(1), up(0), up(1)}, []int{0, 0, 0}},
+	}
+	for _, c := range cases {
+		var tr clickTracker
+		var got []int
+		for _, s := range c.steps {
+			got = append(got, tr.add(s, s.x)) // the step's x stands in for the box it is on
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: toggles %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestHitItemMatchesRenderWithStaleGeo(t *testing.T) {
+	l, _ := parseMarkdown("- [ ] a {#1}\n- [ ] b {#2}\n")
+	rows, _ := layout(l)
+	// One row short, as if made for another version of the list, and with
+	// item 2 folded away. Render ignores it and draws the resting layout,
+	// so a click hits the rows where that layout puts them.
+	stale := []rowGeo{{rows[0].center, 0}}
+	if it := hitItem(l, stale, marginLeft+boxCenter, rows[1].center); it == nil || it.ID != 2 {
+		t.Errorf("hit %v, want item 2 where Render draws it", it)
+	}
+}
+
+func TestDecodeModeReports(t *testing.T) {
+	var got []modeReport
+	var d keyDecoder
+	d.feed([]byte("\x1b[?1016;1$y\x1b[?1016;0$y\x1b[?2026;3$y\x1b[?1$y"), func(ev termEvent) {
+		if ev.mode != nil {
+			got = append(got, *ev.mode)
+		}
+		if ev.key.code != 0 {
+			t.Errorf("a mode report came out as key %+v", ev.key)
+		}
+	})
+	want := []modeReport{{1016, 1}, {1016, 0}, {2026, 3}}
+	if !slices.Equal(got, want) {
+		t.Errorf("reports = %+v, want %+v", got, want)
+	}
+	if !(modeReport{1016, 1}).on() || !(modeReport{1016, 3}).on() || (modeReport{1016, 0}).on() || (modeReport{1016, 2}).on() {
+		t.Error("on() should be true only for set (1) and permanently set (3)")
+	}
+}
+
+func TestWaitErrorsNameTheMissingItems(t *testing.T) {
+	l, _ := parseMarkdown("- [ ] one {#1}\n")
+	if err := checkWatched(l, []int{9}); err == nil || err.Error() != "the list has no item 9" {
+		t.Errorf("one ID: %v", err)
+	}
+	if err := checkWatched(l, []int{8, 9}); err == nil || err.Error() != "the list has none of the items 8, 9" {
+		t.Errorf("two IDs: %v", err)
+	}
+}
+
+func TestWaitWarnsWithNoViewerOpen(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "nopane")
+	path := listPath("nopane")
+	saveMarkdown(t, path, "- [ ] one {#1}\n")
+	if err := toggleByUser(path, 1, StatusPending); err != nil {
+		t.Fatal(err)
+	}
+	stderr := capture(t, &os.Stderr, func() { captureStdout(t, func() { mustRun(t, "wait") }) })
+	if !strings.Contains(stderr, "no viewer pane") {
+		t.Errorf("wait with no pane open warned %q", stderr)
 	}
 }

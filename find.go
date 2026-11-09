@@ -422,8 +422,7 @@ func (r *renderer) findBar(f *findState, widthPx, heightPx int, cy, fieldX float
 	r.magnifier(img, fieldX-(textX-iconCenterX), cy)
 	end := right
 	if status := f.status(); status != "" {
-		face := r.fonts.face(false, fontSize*s)
-		w := r.measure(face, status, tracking*fontSize*s) / s
+		w := r.measure(status, false) / s
 		r.text(img, status, right-w, cy+baselineOffset, false, r.pal.doneText, 0)
 		end = right - w - 12
 	}
