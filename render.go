@@ -260,10 +260,10 @@ func layoutVis(l *List, vis []bool) (rows []row, height float64) {
 // the layout of the rows that show.
 func layoutOpen(l *List, open []float64) (rows []row, height float64) {
 	w := func(i int, folded bool) float64 {
-		if open == nil && folded {
-			return 0
-		}
 		if open == nil {
+			if folded {
+				return 0
+			}
 			return 1
 		}
 		if i < len(open) {
