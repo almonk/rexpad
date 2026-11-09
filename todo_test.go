@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -1168,6 +1169,84 @@ func TestFindHighlightsOnWrappedLines(t *testing.T) {
 	for i := range lines {
 		if line(i) != (i == at) {
 			t.Errorf("line %d (%q) changed: %v; only line %d should", i, lines[i], line(i), at)
+		}
+	}
+}
+
+func TestViewerCommandCarriesCallerSettings(t *testing.T) {
+	t.Setenv("REXPAD_FONT", "/fonts/Mono Regular.otf")
+	t.Setenv("REXPAD_FONT_BOLD", "")
+	t.Setenv("REXPAD_SCALE", "2")
+	t.Setenv("XDG_STATE_HOME", "/state")
+	got := viewerCommand("/bin/rexpad", "l", "dark")
+	want := []string{"/usr/bin/env", "REXPAD_FONT=/fonts/Mono Regular.otf", "REXPAD_SCALE=2", "XDG_STATE_HOME=/state",
+		"/bin/rexpad", "view", "--list", "l", "--theme", "dark"}
+	if !slices.Equal(got, want) {
+		t.Errorf("viewerCommand = %q\nwant %q", got, want)
+	}
+}
+
+func TestViewerCommandWithoutSettings(t *testing.T) {
+	for _, k := range viewerSettings {
+		t.Setenv(k, "")
+	}
+	got := viewerCommand("/bin/rexpad", "l", "terminal")
+	want := []string{"/bin/rexpad", "view", "--list", "l", "--theme", "terminal"}
+	if !slices.Equal(got, want) {
+		t.Errorf("viewerCommand = %q\nwant %q", got, want)
+	}
+}
+
+func TestShowPaneStartsViewerWithCallerSettings(t *testing.T) {
+	bin := t.TempDir()
+	argsFile := filepath.Join(bin, "args")
+	fakeRex := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\necho block-1\n"
+	if err := os.WriteFile(filepath.Join(bin, "rex"), []byte(fakeRex), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REX_SERVER", "test")
+	t.Setenv("REX_BLOCK", "") // one rex call: no block move afterwards
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_SCALE", "2")
+	if err := showPane("l", showOptions{split: "right", ratio: 30, theme: "dark"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, _ := os.Executable()
+	want := strings.Join(viewerCommand(self, "l", "dark"), "\n")
+	if !strings.HasSuffix(strings.TrimSpace(string(got)), "\n--\n"+want) {
+		t.Errorf("rex split argv:\n%s\nwant it to end with:\n--\n%s", got, want)
+	}
+}
+
+// A setting the viewer reads but show doesn't pass on is silently lost in
+// the pane, so every environment read outside show must be in viewerSettings.
+func TestViewerSettingsCoverEveryEnvRead(t *testing.T) {
+	passedAnotherWay := map[string]bool{
+		"REXPAD_LIST": true, "REX_BLOCK": true, // show passes --list
+		"REX_SERVER": true, // read only by show
+	}
+	getenv := regexp.MustCompile(`os\.Getenv\("([A-Z_]+)"\)`)
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || f == "pane.go" {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range getenv.FindAllStringSubmatch(string(src), -1) {
+			if key := m[1]; !passedAnotherWay[key] && !slices.Contains(viewerSettings, key) {
+				t.Errorf("%s reads $%s, which show does not pass to the viewer", f, key)
+			}
 		}
 	}
 }

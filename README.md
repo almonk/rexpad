@@ -204,9 +204,15 @@ Agent skill
 | `--list NAME`, `$REXPAD_LIST` | the agent's pane (`$REX_BLOCK`) | Which list to use. Give several agents the same name to share one list. |
 | `--theme` | `terminal` | `terminal` follows the Rex theme; `light` and `dark` use fixed palettes. |
 | `--ratio PCT` | `30` | The pane's share of the split. |
-| `--scale N`, `$REXPAD_SCALE` | from the cell size | Device pixels per point. |
+| `--scale N` (`view`, `render`), `$REXPAD_SCALE` | from the cell size | Device pixels per point. |
 | `$REXPAD_FONT`, `$REXPAD_FONT_BOLD` | SF Pro Text | Paths to other font files. |
 | `$XDG_STATE_HOME` | `~/.local/state` | Lists are stored in `rexpad/` under it. |
+
+Rex starts the viewer pane in its own environment, not in your shell's. So
+`show` passes `$REXPAD_FONT`, `$REXPAD_FONT_BOLD`, `$REXPAD_SCALE`, and
+`$XDG_STATE_HOME` from the shell that runs it to the viewer. Set them where
+your agent's shell reads them, such as `~/.zshrc`. An open viewer keeps the
+values it started with, so run `hide` and then `show` to apply a change.
 
 ## How it works
 
