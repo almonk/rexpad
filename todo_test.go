@@ -2154,6 +2154,28 @@ func TestSetKeepsCollapsedGroups(t *testing.T) {
 	}
 }
 
+func TestSetPairsGroupsThatShareATitleInOrder(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "sametitle")
+	path := listPath("sametitle")
+	set := func(input string) *List {
+		t.Helper()
+		withStdin(t, input, func() { captureStdout(t, func() { mustRun(t, "set") }) })
+		return mustLoad(t, path)
+	}
+	set("# A\n- [ ] a\n# A\n- [ ] b\n")
+	if err := toggleCollapsedByUser(path, "A\x001", false); err != nil {
+		t.Fatal(err)
+	}
+	if l := set("# A\n- [ ] a\n# A\n- [ ] b\n"); l.Groups[0].Collapsed || !l.Groups[1].Collapsed {
+		t.Errorf("collapsed = %v, %v; want only the second A", l.Groups[0].Collapsed, l.Groups[1].Collapsed)
+	}
+	// With one A left, it is the first A, which was open.
+	if l := set("# A\n- [ ] a\n"); l.Groups[0].Collapsed {
+		t.Error("the one A left took the second A's state")
+	}
+}
+
 func TestSetReplacesAnUnreadableList(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("REXPAD_LIST", "broken")
