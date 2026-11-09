@@ -120,4 +120,5 @@ when you start unrelated work (then `set` the new plan instead).
 - The user can collapse a group with a click on its header (`"collapsed": true`
   in `rexpad get --json`). `rexpad collapse GROUP` and `rexpad expand GROUP`
   do the same, with GROUP as for `add -g`. Do not expand a group that the
-  user collapsed, unless the user asks.
+  user collapsed, unless the user asks. The list does not record who
+  collapsed a group, so expand only a group that you collapsed yourself.

@@ -482,13 +482,20 @@ func run(args []string) error {
 		})
 
 	case "collapse", "expand":
-		if len(args) != 1 {
+		if len(args) == 0 {
 			return fmt.Errorf("%s needs GROUP", cmd)
+		}
+		if len(args) > 1 {
+			return fmt.Errorf("%s takes one GROUP; quote a title that has spaces", cmd)
 		}
 		return mutate(func(l *List) error {
 			g := l.group(args[0])
 			if g == nil {
 				return fmt.Errorf("no group %q", args[0])
+			}
+			if cmd == "collapse" && g.Title == "" {
+				// It would have no header to click open again.
+				return fmt.Errorf("group %s has no title, so it cannot collapse", args[0])
 			}
 			g.Collapsed = cmd == "collapse"
 			return nil

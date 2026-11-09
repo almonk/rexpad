@@ -152,6 +152,25 @@ func TestCommands(t *testing.T) {
 	}
 }
 
+func TestGroupRef(t *testing.T) {
+	l, _ := parseMarkdown("# Build\n- [ ] a\n# Ship\n- [ ] b\n")
+	for ref, want := range map[string]string{"2": "Ship", "ship": "Ship", "bu": "Build", "": "", "3": "", "x": ""} {
+		got := ""
+		if g := l.group(ref); g != nil {
+			got = g.Title
+		}
+		if got != want {
+			t.Errorf("group(%q) = %q, want %q", ref, got, want)
+		}
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "groupref")
+	saveMarkdown(t, listPath("groupref"), "# Build\n- [ ] a\n")
+	if err := run([]string{"progress", "", "50"}); err == nil {
+		t.Error("progress with an empty GROUP should fail")
+	}
+}
+
 func TestListNameIsSafe(t *testing.T) {
 	t.Setenv("REXPAD_LIST", "")
 	t.Setenv("REX_BLOCK", "block:01a1/../x")
@@ -2245,6 +2264,16 @@ func TestCollapseAndExpandCommands(t *testing.T) {
 	}
 	if err := run([]string{"expand"}); err == nil {
 		t.Error("expand with no group should fail")
+	}
+	if err := run([]string{"collapse", "Deploy", "to", "prod"}); err == nil || !strings.Contains(err.Error(), "quote") {
+		t.Errorf("collapse with an unquoted title: %v, want an error that says to quote it", err)
+	}
+
+	// A group without a title has no header to click open again, so it
+	// never folds.
+	saveMarkdown(t, path, "- [ ] a {#1}\n")
+	if err := run([]string{"collapse", "1"}); err == nil {
+		t.Error("collapse on a group without a title should fail")
 	}
 }
 

@@ -367,6 +367,9 @@ func (l *List) keepCollapsed(old *List) {
 
 // group finds a group by case-insensitive title prefix, or by 1-based index.
 func (l *List) group(ref string) *Group {
+	if ref == "" {
+		return nil // every title starts with "", so it would name the first group
+	}
 	if n, err := strconv.Atoi(ref); err == nil && n >= 1 && n <= len(l.Groups) {
 		return &l.Groups[n-1]
 	}
