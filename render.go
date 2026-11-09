@@ -9,7 +9,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"golang.org/x/image/font"
 	"golang.org/x/image/math/fixed"
 	"golang.org/x/image/vector"
 )
@@ -18,11 +17,6 @@ import (
 // screenshot of a Things-style project list). Every vertical position is
 // relative to the center line of the row it belongs to.
 const (
-	fontSize = 14.0
-	// Apple's SF Pro tracking at 14pt is -0.154pt; the static fonts don't
-	// apply it on their own.
-	tracking = -0.011 // em
-
 	// No padding of its own: the margins are just enough that the active
 	// row's highlight (activeInset past the content) meets the pane's edges.
 	marginLeft  = activeInset
@@ -481,8 +475,6 @@ func (r *renderer) text(img *image.RGBA, s string, x, y float64, bold bool, col 
 // byte ranges of s; a match cut off by the ellipsis highlights the ellipsis.
 // (The current match is marked by an outline around its row, not here.)
 func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool, col color.RGBA, maxW float64, marks []span) (float64, bool) {
-	face := r.fonts.face(bold, fontSize*r.scale)
-	track := tracking * fontSize * r.scale
 	s, kept, truncated := r.fit(s, bold, maxW)
 
 	// Highlights, mapped onto the drawn string, filled as one path so
@@ -496,29 +488,20 @@ func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool
 		if a >= b {
 			continue
 		}
-		x0 := x + r.measure(face, s[:a], track)/r.scale - 1
-		x1 := x + r.measure(face, s[:b], track)/r.scale + 1
+		x0 := x + r.measure(s[:a], bold)/r.scale - 1
+		x1 := x + r.measure(s[:b], bold)/r.scale + 1
 		cy := y - baselineOffset
 		hl.poly(roundRect(x0, cy-9, x1, cy+9, 3))
 	}
 	hl.fill(r.tint(0.38))
 
-	src := image.NewUniform(col)
-	dot := fixed.Point26_6{X: fixed.Int26_6(x * r.scale * 64), Y: fixed.Int26_6(math.Round(y*r.scale) * 64)}
-	start := dot.X
-	prev := rune(-1)
-	for _, c := range s {
-		if prev >= 0 {
-			dot.X += face.Kern(prev, c)
-		}
-		dr, mask, mp, adv, ok := face.Glyph(dot, c)
-		if ok {
-			draw.DrawMask(img, dr, src, image.Point{}, mask, mp, draw.Over)
-		}
-		dot.X += adv + fixed.Int26_6(track*64)
-		prev = c
+	origin := fixed.Point26_6{X: fixed.Int26_6(x * r.scale * 64), Y: fixed.Int26_6(math.Round(y*r.scale) * 64)}
+	if r.snap() {
+		origin.X = fixed.I(origin.X.Round())
 	}
-	return float64(dot.X-start) / 64 / r.scale, truncated
+	run := r.layout(s, bold)
+	r.drawRun(img, run, origin, bold, col)
+	return float64(run.width) / 64 / r.scale, truncated
 }
 
 // fit is s as drawn in maxW points (no limit when maxW <= 0): cut with an
@@ -526,16 +509,14 @@ func (r *renderer) textMarked(img *image.RGBA, s string, x, y float64, bold bool
 // ellipsis.
 func (r *renderer) fit(s string, bold bool, maxW float64) (shown string, kept int, truncated bool) {
 	s = strings.ReplaceAll(s, "\t", " ") // fonts have no tab glyph
-	face := r.fonts.face(bold, fontSize*r.scale)
-	track := tracking * fontSize * r.scale
-	if maxW <= 0 || r.measure(face, s, track) <= maxW*r.scale {
+	if maxW <= 0 || r.measure(s, bold) <= maxW*r.scale {
 		return s, len(s), false
 	}
 	const ell = "…"
 	for len(s) > 0 {
 		_, size := utf8.DecodeLastRuneInString(s)
 		s = s[:len(s)-size]
-		if r.measure(face, trimRight(s)+ell, track) <= maxW*r.scale {
+		if r.measure(trimRight(s)+ell, bold) <= maxW*r.scale {
 			break
 		}
 	}
@@ -546,21 +527,7 @@ func (r *renderer) fit(s string, bold bool, maxW float64) (shown string, kept in
 // textWidth is how wide fit's text is drawn, in points.
 func (r *renderer) textWidth(s string, bold bool, maxW float64) float64 {
 	shown, _, _ := r.fit(s, bold, maxW)
-	return r.measure(r.fonts.face(bold, fontSize*r.scale), shown, tracking*fontSize*r.scale) / r.scale
-}
-
-func (r *renderer) measure(face font.Face, s string, track float64) float64 {
-	var w fixed.Int26_6
-	prev := rune(-1)
-	for _, c := range s {
-		if prev >= 0 {
-			w += face.Kern(prev, c)
-		}
-		adv, _ := face.GlyphAdvance(c)
-		w += adv + fixed.Int26_6(track*64)
-		prev = c
-	}
-	return float64(w) / 64
+	return r.measure(shown, bold) / r.scale
 }
 
 func trimRight(s string) string {

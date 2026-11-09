@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"sync"
 
-	"golang.org/x/image/font"
+	gtfont "github.com/go-text/typesetting/font"
+	"github.com/go-text/typesetting/shaping"
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/gofont/goregular"
-	"golang.org/x/image/font/opentype"
+	"golang.org/x/image/font/sfnt"
 )
 
 // The design uses SF Pro Text. macOS ships it as a variable font that
@@ -32,61 +36,110 @@ var (
 	}
 )
 
+const (
+	defaultFontSize = 14.0 // points
+	// Apple's SF Pro tracking at 14pt is -0.154pt; the static fonts don't
+	// apply it on their own. A font the user picks gets none.
+	defaultTracking = -0.011 // em
+)
+
+// typeface is one font file, parsed once for drawing outlines and once for
+// shaping. Both read the same bytes, so they agree on glyph IDs.
+type typeface struct {
+	outlines *sfnt.Font
+	shaping  *gtfont.Face
+	tracking float64 // em
+}
+
 type fontSet struct {
-	regular, bold *opentype.Font
-	mu            sync.Mutex
-	faces         map[faceKey]font.Face
+	regular, bold typeface
+	size          float64     // points
+	edge          *[256]uint8 // coverage curve that darkens text edges; nil leaves them as drawn
+
+	mu     sync.Mutex
+	shaper shaping.HarfbuzzShaper
+	runs   map[runKey]textRun
 }
 
-type faceKey struct {
-	bold bool
-	size float64
-}
-
-func loadFont(env string, candidates []string, fallback []byte) (*opentype.Font, error) {
-	if p := os.Getenv(env); p != "" {
-		candidates = append([]string{p}, candidates...)
+func loadTypeface(env string, candidates []string, fallback []byte) (typeface, error) {
+	chosen := os.Getenv(env)
+	if chosen != "" {
+		candidates = append([]string{chosen}, candidates...)
 	}
 	for _, p := range candidates {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		if f, err := opentype.Parse(data); err == nil {
-			return f, nil
+		tf, err := parseTypeface(data)
+		if err != nil {
+			continue
 		}
+		if p == chosen {
+			tf.tracking = 0
+		}
+		return tf, nil
 	}
-	return opentype.Parse(fallback)
+	return parseTypeface(fallback)
+}
+
+func parseTypeface(data []byte) (typeface, error) {
+	outlines, err := sfnt.Parse(data)
+	if err != nil {
+		return typeface{}, err
+	}
+	shapingFace, err := gtfont.ParseTTF(bytes.NewReader(data))
+	if err != nil {
+		return typeface{}, err
+	}
+	return typeface{outlines: outlines, shaping: shapingFace, tracking: defaultTracking}, nil
 }
 
 func loadFonts() (*fontSet, error) {
-	regular, err := loadFont("REXPAD_FONT", regularCandidates, goregular.TTF)
+	regular, err := loadTypeface("REXPAD_FONT", regularCandidates, goregular.TTF)
 	if err != nil {
 		return nil, fmt.Errorf("load regular font: %w", err)
 	}
-	bold, err := loadFont("REXPAD_FONT_BOLD", boldCandidates, gobold.TTF)
+	bold, err := loadTypeface("REXPAD_FONT_BOLD", boldCandidates, gobold.TTF)
 	if err != nil {
 		return nil, fmt.Errorf("load bold font: %w", err)
 	}
-	return &fontSet{regular: regular, bold: bold, faces: map[faceKey]font.Face{}}, nil
+	return &fontSet{
+		regular: regular,
+		bold:    bold,
+		size:    positiveSetting("REXPAD_FONT_SIZE", defaultFontSize),
+		edge:    edgeCurve(positiveSetting("REXPAD_TEXT_GAMMA", 1)),
+		runs:    map[runKey]textRun{},
+	}, nil
 }
 
-// face returns a face at size device pixels.
-func (fs *fontSet) face(bold bool, size float64) font.Face {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	k := faceKey{bold, size}
-	if f, ok := fs.faces[k]; ok {
-		return f
+// positiveSetting is the number in $key, or fallback when it's unset or not
+// a positive number.
+func positiveSetting(key string, fallback float64) float64 {
+	v, err := strconv.ParseFloat(os.Getenv(key), 64)
+	if err != nil || !(v > 0 && v < math.Inf(1)) {
+		return fallback
 	}
-	src := fs.regular
+	return v
+}
+
+// edgeCurve raises glyph coverage to 1/gamma. A gamma above 1 thickens the
+// anti-aliased edges, close to what macOS's "Improve text contrast" does,
+// which matters most on a 1x display.
+func edgeCurve(gamma float64) *[256]uint8 {
+	if gamma == 1 {
+		return nil
+	}
+	var curve [256]uint8
+	for i := range curve {
+		curve[i] = uint8(math.Round(255 * math.Pow(float64(i)/255, 1/gamma)))
+	}
+	return &curve
+}
+
+func (fs *fontSet) typeface(bold bool) *typeface {
 	if bold {
-		src = fs.bold
+		return &fs.bold
 	}
-	f, err := opentype.NewFace(src, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingNone})
-	if err != nil {
-		panic(err)
-	}
-	fs.faces[k] = f
-	return f
+	return &fs.regular
 }

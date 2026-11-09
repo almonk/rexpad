@@ -18,6 +18,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/image/font/gofont/goregular"
+	"golang.org/x/image/font/sfnt"
 )
 
 const sample = `# Investigate the crash
@@ -1230,7 +1233,8 @@ func TestViewerSettingsCoverEveryEnvRead(t *testing.T) {
 		"REXPAD_LIST": true, "REX_BLOCK": true, // show passes --list
 		"REX_SERVER": true, // read only by show
 	}
-	getenv := regexp.MustCompile(`os\.Getenv\("([A-Z_]+)"\)`)
+	// Any quoted setting name counts, so a read through a helper is found too.
+	getenv := regexp.MustCompile(`"((?:REXPAD|XDG)_[A-Z_]+)"`)
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -1247,6 +1251,112 @@ func TestViewerSettingsCoverEveryEnvRead(t *testing.T) {
 			if key := m[1]; !passedAnotherWay[key] && !slices.Contains(viewerSettings, key) {
 				t.Errorf("%s reads $%s, which show does not pass to the viewer", f, key)
 			}
+		}
+	}
+}
+
+// fontFile writes Go's bundled regular font to a file, as a stand-in for a
+// font the user names in $REXPAD_FONT.
+func fontFile(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "font.ttf")
+	if err := os.WriteFile(p, goregular.TTF, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestFontSettingsDefaults(t *testing.T) {
+	for _, k := range []string{"REXPAD_FONT", "REXPAD_FONT_SIZE", "REXPAD_TEXT_GAMMA"} {
+		t.Setenv(k, "")
+	}
+	fonts, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fonts.size != 14 || fonts.regular.tracking != -0.011 || fonts.edge != nil {
+		t.Errorf("size %v, tracking %v, edge set %v; want 14, -0.011, false", fonts.size, fonts.regular.tracking, fonts.edge != nil)
+	}
+}
+
+func TestFontSettingsFromEnvironment(t *testing.T) {
+	t.Setenv("REXPAD_FONT", fontFile(t))
+	t.Setenv("REXPAD_FONT_SIZE", "12")
+	t.Setenv("REXPAD_TEXT_GAMMA", "1.4")
+	fonts, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SF Pro's tracking is wrong for any other font.
+	if fonts.size != 12 || fonts.regular.tracking != 0 {
+		t.Errorf("size %v, tracking %v; want 12, 0", fonts.size, fonts.regular.tracking)
+	}
+	if fonts.edge == nil || fonts.edge[0] != 0 || fonts.edge[255] != 255 || fonts.edge[128] <= 128 {
+		t.Errorf("gamma 1.4 should darken edges and keep 0 and 255: %v", fonts.edge)
+	}
+}
+
+func TestFontSettingsIgnoreBadValues(t *testing.T) {
+	t.Setenv("REXPAD_FONT", "/no/such/font.otf")
+	t.Setenv("REXPAD_FONT_SIZE", "-3")
+	t.Setenv("REXPAD_TEXT_GAMMA", "dark")
+	fonts, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fonts.size != 14 || fonts.regular.tracking != -0.011 || fonts.edge != nil {
+		t.Errorf("size %v, tracking %v, edge set %v; want the defaults", fonts.size, fonts.regular.tracking, fonts.edge != nil)
+	}
+}
+
+func TestTextSnapsToWholePixelsBelow2x(t *testing.T) {
+	fonts, _ := loadFonts()
+	whole := func(scale float64) bool {
+		run := (&renderer{fonts: fonts, scale: scale}).layout("Review the patch, then open the PR", false)
+		for _, g := range run.glyphs {
+			if g.x%64 != 0 {
+				return false
+			}
+		}
+		return run.width%64 == 0
+	}
+	if !whole(1) {
+		t.Error("at 1x every glyph should start on a whole pixel")
+	}
+	if whole(2) {
+		t.Error("at 2x glyphs keep their fractional positions, as the design has them")
+	}
+}
+
+func TestLayoutGlyphsMatchTheFont(t *testing.T) {
+	t.Setenv("REXPAD_FONT", fontFile(t))
+	fonts, _ := loadFonts()
+	const s = "Ship it"
+	run := (&renderer{fonts: fonts, scale: 2}).layout(s, false)
+	var buf sfnt.Buffer
+	var want []sfnt.GlyphIndex
+	for _, c := range s {
+		id, _ := fonts.regular.outlines.GlyphIndex(&buf, c)
+		want = append(want, id)
+	}
+	var got []sfnt.GlyphIndex
+	for _, g := range run.glyphs {
+		got = append(got, g.id)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("shaped glyphs %v, want the font's own %v", got, want)
+	}
+}
+
+func TestMeasureMatchesDrawnText(t *testing.T) {
+	fonts, _ := loadFonts()
+	for _, scale := range []float64{1, 2} {
+		r := &renderer{fonts: fonts, scale: scale, pal: lightPalette}
+		img := image.NewRGBA(image.Rect(0, 0, 800, 100))
+		const s = "Wrap long items, and refresh the README"
+		drawn, _ := r.text(img, s, 10, 40, false, lightPalette.text, 0)
+		if measured := r.measure(s, false) / scale; measured != drawn {
+			t.Errorf("at %vx: measured %v points, drew %v", scale, measured, drawn)
 		}
 	}
 }
