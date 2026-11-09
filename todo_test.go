@@ -1943,15 +1943,15 @@ func TestClickedItemUsesTheFrameOnScreen(t *testing.T) {
 	const scale = 2.0
 	boxPx := int((marginLeft + boxCenter) * scale)
 	at := func(id int) int { return int(rows[id-1].center * scale) }
-	if got := itemID(clickedItem(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, 0, 1000)); got != 2 {
+	if got := itemID(clickedAt(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, 0, 1000).item); got != 2 {
 		t.Errorf("unscrolled: hit %d, want 2", got)
 	}
 	// Scrolled down one row: item 3 is drawn where item 2 was.
-	if got := itemID(clickedItem(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, int(itemPitch*scale), 1000)); got != 3 {
+	if got := itemID(clickedAt(l, nil, mouseClick{x: boxPx, y: at(2)}, scale, int(itemPitch*scale), 1000).item); got != 3 {
 		t.Errorf("scrolled: hit %d, want 3", got)
 	}
 	// The find bar covers the pane below viewPx.
-	if got := itemID(clickedItem(l, nil, mouseClick{x: boxPx, y: at(3)}, scale, 0, at(3)-10)); got != 0 {
+	if got := itemID(clickedAt(l, nil, mouseClick{x: boxPx, y: at(3)}, scale, 0, at(3)-10).item); got != 0 {
 		t.Errorf("a click on the find bar hit item %d", got)
 	}
 }
@@ -2005,7 +2005,7 @@ func TestClickTrackerPairsPressAndRelease(t *testing.T) {
 		var tr clickTracker
 		var got []int
 		for _, s := range c.steps {
-			got = append(got, tr.add(s, s.x)) // the step's x stands in for the box it is on
+			got = append(got, tr.add(s, clickTarget{item: s.x}).item) // the step's x stands in for the box it is on
 		}
 		if !slices.Equal(got, c.want) {
 			t.Errorf("%s: toggles %v, want %v", c.name, got, c.want)
@@ -2354,5 +2354,98 @@ func TestFollowGoesToTheHeaderOfACollapsedGroup(t *testing.T) {
 	l.Groups[1].Items[20].Status = StatusPending
 	if off, _ := followOffset(l, viewH); off != header-viewH/3 {
 		t.Errorf("no active item: offset %v, want %v", off, header-viewH/3)
+	}
+}
+
+// groupTitle is the group's title, or "" for no group.
+func groupTitle(g *Group) string {
+	if g == nil {
+		return ""
+	}
+	return g.Title
+}
+
+func TestHitHeader(t *testing.T) {
+	l, _ := parseMarkdown("# A\n- [ ] a {#1}\n# B\n- [ ] b {#2}\n")
+	rows, _ := layout(l)
+	a, b := rows[0].center, rows[2].center
+	cases := []struct {
+		name string
+		x, y float64
+		want string
+	}{
+		{"on the title", marginLeft + titleX + 5, a, "A"},
+		{"on the ring", marginLeft + iconCenterX, a, "A"},
+		{"at the pane's left edge", 0, a, "A"},
+		{"on the arrow at the right", 380, a, "A"},
+		{"half a row above the center", 100, a - itemPitch/2, "A"},
+		{"just above the divider", 100, a + dividerOffset - 0.5, "A"},
+		{"on the second header", 100, b, "B"},
+		{"above the header", 100, a - itemPitch/2 - 1, ""},
+		{"on the divider", 100, a + dividerOffset + 0.5, ""},
+		{"on an item", 100, rows[1].center, ""},
+		{"left of the pane", -1, a, ""},
+	}
+	for _, c := range cases {
+		if got := groupTitle(hitHeader(l, nil, c.x, c.y)); got != c.want {
+			t.Errorf("%s: hit %q, want %q", c.name, got, c.want)
+		}
+	}
+	// While rows fold, a click hits the header where it is drawn, and never
+	// one that is still folding.
+	geo, _ := geoFor(l, nil)
+	geo[2].center += 10
+	if got := groupTitle(hitHeader(l, geo, 100, geo[2].center)); got != "B" {
+		t.Errorf("moved: hit %q, want B", got)
+	}
+	geo[2].open = 0.5
+	if got := groupTitle(hitHeader(l, geo, 100, geo[2].center)); got != "" {
+		t.Errorf("hit %q while it was still folding", got)
+	}
+}
+
+func TestClickedAtTellsBoxesFromHeaders(t *testing.T) {
+	l, _ := parseMarkdown("# A\n- [ ] a {#1}\n")
+	rows, _ := layout(l)
+	const scale = 2.0
+	px := func(x, y float64) mouseClick { return mouseClick{x: int(x * scale), y: int(y * scale)} }
+	if h := clickedAt(l, nil, px(marginLeft+boxCenter, rows[1].center), scale, 0, 1000); itemID(h.item) != 1 || h.group != nil {
+		t.Errorf("a click on the box hit %+v, want item 1", h)
+	}
+	h := clickedAt(l, nil, px(100, rows[0].center), scale, 0, 1000)
+	if h.item != nil || groupTitle(h.group) != "A" {
+		t.Errorf("a click on the header hit %+v, want group A", h)
+	}
+	if got := h.target(l); got != (clickTarget{group: keyOf(l, 0)}) {
+		t.Errorf("header target = %+v", got)
+	}
+	if h := clickedAt(l, nil, px(100, rows[1].center), scale, 0, 1000); h != (clickHit{}) {
+		t.Errorf("a click on an item's text hit %+v, want nothing", h)
+	}
+	// The find bar covers the pane below viewPx, headers too.
+	c := px(100, rows[0].center)
+	if h := clickedAt(l, nil, c, scale, 0, c.y-1); h != (clickHit{}) {
+		t.Errorf("a click on the find bar hit %+v", h)
+	}
+}
+
+func TestClickTrackerTellsHeadersFromBoxes(t *testing.T) {
+	headerA, headerB, box := clickTarget{group: "A\x000"}, clickTarget{group: "B\x000"}, clickTarget{item: 1}
+	cases := []struct {
+		name         string
+		press, relse clickTarget
+		want         clickTarget
+	}{
+		{"down and up on one header", headerA, headerA, headerA},
+		{"down on a header, up on a box", headerA, box, clickTarget{}},
+		{"down on a box, up on a header", box, headerA, clickTarget{}},
+		{"down on one header, up on another", headerA, headerB, clickTarget{}},
+	}
+	for _, c := range cases {
+		var tr clickTracker
+		tr.add(mouseClick{}, c.press)
+		if got := tr.add(mouseClick{release: true}, c.relse); got != c.want {
+			t.Errorf("%s: toggles %+v, want %+v", c.name, got, c.want)
+		}
 	}
 }

@@ -312,30 +312,44 @@ func layoutOpen(l *List, open []float64) (rows []row, height float64) {
 // item: the checkbox column, out to halfway between the box and the text.
 const boxHitRight = marginLeft + (boxCenter+boxSize/2+textX)/2
 
+// drawnRows is l's rows where Render draws them: where geo puts them when
+// it has a row for each row, else in the resting layout.
+func drawnRows(l *List, geo []rowGeo) []row {
+	rows, _ := layout(l)
+	if len(geo) != len(rows) {
+		return rows
+	}
+	for i := range rows {
+		rows[i].center, rows[i].open = geo[i].center, geo[i].open
+	}
+	return rows
+}
+
 // hitItem is the item whose checkbox column holds the point (x, y), in
-// content points, or nil. geo, when it has a row for each row, is where
-// the rows are drawn while they fold; a click cannot hit a row that is not fully open.
+// content points, or nil. geo is as for drawnRows; a click cannot hit a
+// row that is not fully open.
 func hitItem(l *List, geo []rowGeo, x, y float64) *Item {
 	if x < 0 || x >= boxHitRight {
 		return nil
 	}
-	rows, _ := layout(l)
-	if len(geo) != len(rows) {
-		geo = nil // Render draws the resting layout then, so the click hits it too
-	}
-	for i, rw := range rows {
-		if rw.kind != rowItem {
-			continue
-		}
-		center, open := rw.center, rw.open
-		if geo != nil {
-			center, open = geo[i].center, geo[i].open
-		}
-		if open < 1 {
-			continue
-		}
-		if y >= center-itemPitch/2 && y < center+itemPitch/2+rw.extra {
+	for _, rw := range drawnRows(l, geo) {
+		if rw.kind == rowItem && rw.open >= 1 && y >= rw.center-itemPitch/2 && y < rw.center+itemPitch/2+rw.extra {
 			return rw.item
+		}
+	}
+	return nil
+}
+
+// hitHeader is the group whose header holds the point (x, y), in content
+// points, or nil. A header reaches across the pane, from half a row above
+// its center line down to its divider. geo is as for hitItem.
+func hitHeader(l *List, geo []rowGeo, x, y float64) *Group {
+	if x < 0 {
+		return nil
+	}
+	for _, rw := range drawnRows(l, geo) {
+		if rw.kind == rowHeader && rw.open >= 1 && y >= rw.center-itemPitch/2 && y < rw.center+dividerOffset {
+			return rw.group
 		}
 	}
 	return nil

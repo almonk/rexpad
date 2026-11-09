@@ -23,36 +23,65 @@ import (
 type viewOptions struct {
 	theme   string  // terminal (follow the terminal's colors), light, or dark
 	scale   float64 // device pixels per point; 0 picks from the cell size
-	noClick bool    // clicks do not toggle items
+	noClick bool    // clicks do not toggle items or collapse groups
 }
 
-// clickedItem is the item whose box a click at pixel c is on, in the frame
-// drawn at scale and scrolled offsetPx down, with the rows where geo puts
-// them. The find bar covers the pane from viewPx down.
-func clickedItem(l *List, geo []rowGeo, c mouseClick, scale float64, offsetPx, viewPx int) *Item {
+// clickHit is what a click is on: an item's box, a group's header, or
+// neither (both nil).
+type clickHit struct {
+	item  *Item
+	group *Group
+}
+
+// clickedAt is what a click at pixel c is on, in the frame drawn at scale
+// and scrolled offsetPx down, with the rows where geo puts them. The find
+// bar covers the pane from viewPx down.
+func clickedAt(l *List, geo []rowGeo, c mouseClick, scale float64, offsetPx, viewPx int) clickHit {
 	if c.y >= viewPx {
-		return nil
+		return clickHit{}
 	}
-	return hitItem(l, geo, float64(c.x)/scale, float64(c.y+offsetPx)/scale)
+	x, y := float64(c.x)/scale, float64(c.y+offsetPx)/scale
+	if it := hitItem(l, geo, x, y); it != nil {
+		return clickHit{item: it}
+	}
+	return clickHit{group: hitHeader(l, geo, x, y)}
 }
 
-// clickTracker pairs a press with its release: a click toggles an item
-// only when the button goes down and comes up on the same item's box.
-type clickTracker struct{ pressed int }
+// clickTarget names what a click is on, so that a press and its release
+// compare equal across reloads of the list: an item by its ID, a header by
+// its groupKeys key. The zero value is neither.
+type clickTarget struct {
+	item  int
+	group string
+}
 
-// add takes a press or release on item id (0 when it is on no box) and
-// returns the item to toggle, or 0.
-func (t *clickTracker) add(c mouseClick, id int) int {
+func (h clickHit) target(l *List) clickTarget {
+	switch {
+	case h.item != nil:
+		return clickTarget{item: h.item.ID}
+	case h.group != nil:
+		return clickTarget{group: groupKeys(l)[h.group]}
+	}
+	return clickTarget{}
+}
+
+// clickTracker pairs a press with its release: a click acts only when the
+// button goes down and comes up on the same box or header.
+type clickTracker struct{ pressed clickTarget }
+
+// add takes a press or release on target on and returns what to toggle,
+// or the zero target.
+func (t *clickTracker) add(c mouseClick, on clickTarget) clickTarget {
 	if !c.release {
-		t.pressed = id
-		return 0
+		t.pressed = on
+		return clickTarget{}
 	}
 	downOn := t.pressed
-	t.pressed = 0
-	if id != downOn {
-		return 0
+	t.pressed = clickTarget{}
+	if on != downOn {
+		return clickTarget{}
 	}
-	return id
+	return on
 }
 
 // winSize is the pane's size. guessed says the terminal reported no pixel
@@ -1146,8 +1175,9 @@ func runView(name string, opt viewOptions) error {
 		return false
 	}
 
-	// handleClick toggles an item when the button goes down and comes up on
-	// its box. Focus stays in this pane.
+	// handleClick toggles an item, or collapses or expands a group, when
+	// the button goes down and comes up on the item's box or the group's
+	// header. Focus stays in this pane.
 	//
 	// Clicks work only once the terminal confirms that it reports pixels
 	// (mode 1016): a terminal that reports cells instead would put every
@@ -1158,17 +1188,20 @@ func runView(name string, opt viewOptions) error {
 		if opt.noClick || !pixelReports || lastSize.guessed {
 			return
 		}
-		it := clickedItem(list, geo, c, scale, int(math.Round(shown*scale)), listPx)
-		id := 0
-		if it != nil {
-			id = it.ID
-		}
-		if clicks.add(c, id) == 0 {
+		hit := clickedAt(list, geo, c, scale, int(math.Round(shown*scale)), listPx)
+		on := hit.target(list)
+		if clicks.add(c, on) == (clickTarget{}) {
 			return
 		}
-		if err := toggleByUser(path, id, it.Status); err != nil {
+		var err error
+		if hit.item != nil {
+			err = toggleByUser(path, on.item, hit.item.Status)
+		} else {
+			err = toggleCollapsedByUser(path, on.group, hit.group.Collapsed)
+		}
+		if err != nil {
 			// The pane has no room for a message: the bell says the
-			// click did not take, and the box shows it unchanged.
+			// click did not take, and the box or arrow shows it unchanged.
 			fmt.Fprint(w, "\a")
 		}
 		draw(false)
