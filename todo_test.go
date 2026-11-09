@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/zlib"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
@@ -1637,4 +1638,149 @@ func TestConcurrentAddsKeepEveryItem(t *testing.T) {
 	if n := len(l.Groups[0].Items); n != writers {
 		t.Errorf("the list kept %d of %d items: concurrent writes lost updates", n, writers)
 	}
+}
+
+func TestToggleByUser(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path := listPath("toggle")
+	l, _ := parseMarkdown("- [ ] pending {#1}\n- [~] active {#2}\n- [x] done {#3}\n")
+	if err := saveList(path, l); err != nil {
+		t.Fatal(err)
+	}
+	want := map[int]Status{1: StatusDone, 2: StatusDone, 3: StatusPending}
+	for id, shown := range map[int]Status{1: StatusPending, 2: StatusActive, 3: StatusDone} {
+		if err := toggleByUser(path, id, shown); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l, _ = loadList(path)
+	for id, st := range want {
+		if it := l.find(id); it.Status != st || it.By != byUser {
+			t.Errorf("item %d = %s by %q, want %s by %q", id, it.Status, it.By, st, byUser)
+		}
+	}
+	// The click toggles what the viewer showed, even if the file moved on.
+	if err := toggleByUser(path, 1, StatusPending); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ = loadList(path); l.find(1).Status != StatusDone {
+		t.Errorf("a click on a box shown open made it %s, want done", l.find(1).Status)
+	}
+	if err := toggleByUser(path, 99, StatusPending); err == nil {
+		t.Error("toggling a missing item should fail")
+	}
+}
+
+func TestCommandsClearTheUserMark(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "marks")
+	path := listPath("marks")
+	reset := func() {
+		t.Helper()
+		l, _ := parseMarkdown("- [ ] one {#1}\n- [~] two {#2}\n- [x] three {#3}\n")
+		for _, g := range l.Groups {
+			for i := range g.Items {
+				g.Items[i].By = byUser
+			}
+		}
+		if err := saveList(path, l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := [][]string{
+		{"done", "1"}, {"undo", "1"}, {"start", "1"}, {"edit", "1", "new text"},
+		{"done"}, {"next"}, {"set"},
+	}
+	for _, args := range cases {
+		reset()
+		if args[0] == "set" {
+			// set replaces every item, even with the same text and status.
+			out, _ := json.Marshal(mustLoad(t, path))
+			withStdin(t, string(out), func() { captureStdout(t, func() { mustRun(t, "set", "--json") }) })
+		} else {
+			captureStdout(t, func() { mustRun(t, args...) })
+		}
+		l := mustLoad(t, path)
+		for _, g := range l.Groups {
+			for _, it := range g.Items {
+				touched := args[0] == "set" ||
+					(args[0] == "next" && it.ID <= 2) || // finishes 2, starts 1
+					(len(args) > 1 && it.ID == 1) ||
+					(args[0] == "start" && it.ID == 2) || // demoted to pending
+					(args[0] == "done" && len(args) == 1 && it.ID == 2)
+				if touched && it.By != "" {
+					t.Errorf("%v: item %d kept by %q", args, it.ID, it.By)
+				}
+				if !touched && it.By != byUser {
+					t.Errorf("%v: item %d lost the user's mark", args, it.ID)
+				}
+			}
+		}
+	}
+}
+
+func TestGetShowsTheUserMarkOnlyInJSON(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "get")
+	path := listPath("get")
+	l, _ := parseMarkdown("- [ ] one {#1}\n")
+	if err := saveList(path, l); err != nil {
+		t.Fatal(err)
+	}
+	if err := toggleByUser(path, 1, StatusPending); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureStdout(t, func() { mustRun(t, "get") }); got != "- [x] one {#1}\n" {
+		t.Errorf("get = %q", got)
+	}
+	if got := captureStdout(t, func() { mustRun(t, "get", "--json") }); !strings.Contains(got, `"by": "user"`) {
+		t.Errorf("get --json has no by field:\n%s", got)
+	}
+}
+
+func mustRun(t *testing.T, args ...string) {
+	t.Helper()
+	if err := run(args); err != nil {
+		t.Fatalf("%v: %v", args, err)
+	}
+}
+
+func mustLoad(t *testing.T, path string) *List {
+	t.Helper()
+	l, err := loadList(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// captureStdout runs fn and returns what it printed.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	fn()
+	w.Close()
+	out, _ := io.ReadAll(r)
+	return string(out)
+}
+
+// withStdin runs fn with input on stdin.
+func withStdin(t *testing.T, input string, fn func()) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(input)
+	f.Seek(0, 0)
+	old := os.Stdin
+	os.Stdin = f
+	defer func() { os.Stdin = old; f.Close() }()
+	fn()
 }

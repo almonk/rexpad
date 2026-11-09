@@ -128,7 +128,7 @@ func run(args []string) error {
 				if it == nil {
 					return fmt.Errorf("no item %d", n)
 				}
-				it.Status = st
+				it.set(st)
 			}
 			return nil
 		})
@@ -233,6 +233,12 @@ func run(args []string) error {
 			}
 		} else if l, err = parseMarkdown(string(data)); err != nil {
 			return err
+		}
+		// A new list is the agent's word on every item.
+		for gi := range l.Groups {
+			for ii := range l.Groups[gi].Items {
+				l.Groups[gi].Items[ii].By = ""
+			}
 		}
 		if err := replace(l); err != nil {
 			return err
@@ -345,13 +351,13 @@ func run(args []string) error {
 				for gi := range l.Groups {
 					for ii := range l.Groups[gi].Items {
 						if it := &l.Groups[gi].Items[ii]; it.Status == StatusActive {
-							it.Status = StatusPending
+							it.set(StatusPending)
 						}
 					}
 				}
 			}
 			for _, n := range ns {
-				l.find(n).Status = StatusActive
+				l.find(n).set(StatusActive)
 			}
 			return nil
 		})
@@ -364,7 +370,7 @@ func run(args []string) error {
 			for gi := range l.Groups {
 				for ii := range l.Groups[gi].Items {
 					if it := &l.Groups[gi].Items[ii]; it.Status == StatusActive {
-						it.Status = StatusDone
+						it.set(StatusDone)
 					}
 				}
 			}
@@ -377,14 +383,14 @@ func run(args []string) error {
 			for gi := range l.Groups {
 				for ii := range l.Groups[gi].Items {
 					if it := &l.Groups[gi].Items[ii]; it.Status == StatusActive {
-						it.Status = StatusDone
+						it.set(StatusDone)
 					}
 				}
 			}
 			for gi := range l.Groups {
 				for ii := range l.Groups[gi].Items {
 					if it := &l.Groups[gi].Items[ii]; it.Status == StatusPending && started == nil {
-						it.Status = StatusActive
+						it.set(StatusActive)
 						started = it
 					}
 				}
@@ -417,6 +423,7 @@ func run(args []string) error {
 				return fmt.Errorf("no item %d", ns[0])
 			}
 			it.Text = strings.Join(args[1:], " ")
+			it.By = ""
 			return nil
 		})
 
