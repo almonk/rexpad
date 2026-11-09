@@ -1616,3 +1616,25 @@ func TestShowAndRenderWarnAboutAnUnusableFont(t *testing.T) {
 		}
 	}
 }
+
+func TestConcurrentAddsKeepEveryItem(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("REXPAD_LIST", "race")
+	const writers = 40
+	errs := make(chan error, writers)
+	for i := range writers {
+		go func() { errs <- run([]string{"add", fmt.Sprint("item ", i)}) }()
+	}
+	for range writers {
+		if err := <-errs; err != nil {
+			t.Errorf("add: %v", err)
+		}
+	}
+	l, err := loadList(listPath("race"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(l.Groups[0].Items); n != writers {
+		t.Errorf("the list kept %d of %d items: concurrent writes lost updates", n, writers)
+	}
+}

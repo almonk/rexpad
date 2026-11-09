@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 type Status string
@@ -122,6 +124,8 @@ func loadList(path string) (*List, error) {
 	return &l, nil
 }
 
+// saveList writes l to a temp file and renames it into place, so a reader
+// never sees half a list. Callers hold the list's lock (withListLock).
 func saveList(path string, l *List) error {
 	l.normalize()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -131,11 +135,61 @@ func saveList(path string, l *List) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(tmp.Name()) // a no-op once the rename succeeds
+	_, err = tmp.Write(append(data, '\n'))
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp.Name(), 0o644) // CreateTemp makes it private
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+// withListLock runs fn while it holds an exclusive lock on path's list.
+// Every writer takes it, so the CLI and the viewer never lose each other's
+// changes between a load and a save.
+func withListLock(path string, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close() // closing the file also releases the lock
+	for {
+		err = unix.Flock(int(f.Fd()), unix.LOCK_EX)
+		if err != unix.EINTR {
+			break
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("lock %s: %w", path, err)
+	}
+	return fn()
+}
+
+// updateList loads the list at path, applies change, and saves it, all
+// under the list's lock.
+func updateList(path string, change func(l *List) error) error {
+	return withListLock(path, func() error {
+		l, err := loadList(path)
+		if err != nil {
+			return err
+		}
+		if err := change(l); err != nil {
+			return err
+		}
+		return saveList(path, l)
+	})
 }
 
 // normalize fills in IDs and statuses so hand-written JSON works.

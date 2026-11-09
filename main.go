@@ -102,16 +102,9 @@ func run(args []string) error {
 	path := listPath(name)
 	cmd, args := rest[0], rest[1:]
 
-	// mutate loads the list, applies f, saves, and prints the result.
-	mutate := func(f func(l *List) error) error {
-		l, err := loadList(path)
-		if err != nil {
-			return err
-		}
-		if err := f(l); err != nil {
-			return err
-		}
-		return saveList(path, l)
+	mutate := func(f func(l *List) error) error { return updateList(path, f) }
+	replace := func(l *List) error {
+		return withListLock(path, func() error { return saveList(path, l) })
 	}
 	ids := func(args []string) ([]int, error) {
 		var out []int
@@ -241,7 +234,7 @@ func run(args []string) error {
 		} else if l, err = parseMarkdown(string(data)); err != nil {
 			return err
 		}
-		if err := saveList(path, l); err != nil {
+		if err := replace(l); err != nil {
 			return err
 		}
 		fmt.Print(l.markdown(true))
@@ -266,7 +259,7 @@ func run(args []string) error {
 		return nil
 
 	case "clear":
-		return saveList(path, &List{NextID: 1})
+		return replace(&List{NextID: 1})
 
 	case "path":
 		fmt.Println(path)
