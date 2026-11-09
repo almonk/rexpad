@@ -54,6 +54,8 @@ Agent skill
   skill show                    print the skill
 
 The list defaults to one per agent pane ($REX_BLOCK). Override with --list or $REXPAD_LIST.
+Settings: $REXPAD_FONT and $REXPAD_FONT_BOLD (font files), $REXPAD_SCALE, $XDG_STATE_HOME.
+show passes them to the viewer pane.
 `
 
 var version = "0.1.0"
