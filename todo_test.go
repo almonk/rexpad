@@ -1967,3 +1967,92 @@ func TestViewArgs(t *testing.T) {
 		t.Errorf("viewArgs = %q, want %q", got, want)
 	}
 }
+
+func TestParseSGRMouseRejectsMalformedReports(t *testing.T) {
+	for _, in := range []string{"<0;12M", "<a;1;1M", "<0;1;1", "<0;1;1;9M", "<0;;1M", "0;1;1M"} {
+		if m, ok := parseSGRMouse(in); ok {
+			t.Errorf("parseSGRMouse(%q) = %+v, want no report", in, m)
+		}
+	}
+	if k := csiScroll("<64;5;5m"); k != scrollNone {
+		t.Errorf("a wheel release scrolled: %v", k)
+	}
+}
+
+func TestClickTrackerPairsPressAndRelease(t *testing.T) {
+	cases := []struct {
+		name  string
+		steps []struct {
+			release bool
+			id      int
+		}
+		want []int
+	}{
+		{"down and up on one box", []struct {
+			release bool
+			id      int
+		}{{false, 1}, {true, 1}}, []int{0, 1}},
+		{"down on one box, up on another", []struct {
+			release bool
+			id      int
+		}{{false, 1}, {true, 2}}, []int{0, 0}},
+		{"down off a box, up on one", []struct {
+			release bool
+			id      int
+		}{{false, 0}, {true, 2}}, []int{0, 0}},
+		{"up with no press", []struct {
+			release bool
+			id      int
+		}{{true, 3}}, []int{0}},
+		{"a second press replaces the first", []struct {
+			release bool
+			id      int
+		}{{false, 1}, {false, 2}, {true, 2}}, []int{0, 0, 2}},
+		{"one press, two releases", []struct {
+			release bool
+			id      int
+		}{{false, 1}, {true, 1}, {true, 1}}, []int{0, 1, 0}},
+	}
+	for _, c := range cases {
+		var tr clickTracker
+		var got []int
+		for _, s := range c.steps {
+			got = append(got, tr.add(mouseClick{release: s.release}, s.id))
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: toggles %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestHitItemMatchesRenderWithStaleGeo(t *testing.T) {
+	l, _ := parseMarkdown("- [ ] a {#1}\n- [ ] b {#2}\n")
+	rows, _ := layout(l)
+	// One row short, as if made for another version of the list, and with
+	// item 2 folded away. Render ignores it and draws the resting layout,
+	// so a click hits the rows where that layout puts them.
+	stale := []rowGeo{{rows[0].center, 0}}
+	if it := hitItem(l, stale, marginLeft+boxCenter, rows[1].center); it == nil || it.ID != 2 {
+		t.Errorf("hit %v, want item 2 where Render draws it", it)
+	}
+}
+
+func TestDecodeModeReports(t *testing.T) {
+	var got []modeReport
+	var d keyDecoder
+	d.feed([]byte("\x1b[?1016;1$y\x1b[?1016;0$y\x1b[?2026;3$y\x1b[?1$y"), func(ev termEvent) {
+		if ev.mode != nil {
+			got = append(got, *ev.mode)
+		}
+		if ev.key.code != 0 {
+			t.Errorf("a mode report came out as key %+v", ev.key)
+		}
+	})
+	want := []modeReport{{1016, 1}, {1016, 0}, {2026, 3}}
+	if !slices.Equal(got, want) {
+		t.Errorf("reports = %+v, want %+v", got, want)
+	}
+	if !(modeReport{1016, 1}).on() || !(modeReport{1016, 3}).on() || (modeReport{1016, 0}).on() || (modeReport{1016, 2}).on() {
+		t.Error("on() should be true only for set (1) and permanently set (3)")
+	}
+}

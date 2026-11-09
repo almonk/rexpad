@@ -51,7 +51,7 @@ func (k keyPress) is(code rune, mods int) bool { return k.code == code && k.mods
 
 // termEvent is one thing read from the terminal: a key press, pasted text,
 // an OSC reply, a color-scheme change report (CSI ? 997 ; n n, mode 2031),
-// a mouse wheel tick, or a left click.
+// a mouse wheel tick, a left click, or a reply to a mode query (DECRQM).
 type termEvent struct {
 	key    keyPress // code 0 when it isn't a key
 	paste  string
@@ -59,7 +59,15 @@ type termEvent struct {
 	scheme bool
 	scroll scrollKind
 	click  *mouseClick
+	mode   *modeReport
 }
+
+// modeReport is the terminal's reply to CSI ? mode $ p: CSI ? mode ; value $ y.
+type modeReport struct{ mode, value int }
+
+// on reports whether the mode is set (1) or permanently set (3). A terminal
+// that doesn't know the mode answers 0.
+func (m modeReport) on() bool { return m.value == 1 || m.value == 3 }
 
 // mouseClick is the left button going down or up, in pixels from the
 // pane's top left (mode 1016 reports pixels, not cells).
@@ -296,6 +304,17 @@ func (d *keyDecoder) csi(seq string, emit func(termEvent)) {
 			emit(termEvent{scroll: k})
 		} else if c := csiClick(seq); c != nil {
 			emit(termEvent{click: c})
+		}
+		return
+	case final == 'y' && strings.HasPrefix(params, "?") && strings.HasSuffix(params, "$"):
+		f := strings.Split(params[1:len(params)-1], ";")
+		if len(f) != 2 {
+			return
+		}
+		mode, err1 := strconv.Atoi(f[0])
+		value, err2 := strconv.Atoi(f[1])
+		if err1 == nil && err2 == nil {
+			emit(termEvent{mode: &modeReport{mode, value}})
 		}
 		return
 	case strings.HasPrefix(params, "?") || strings.HasPrefix(params, ">"):

@@ -316,7 +316,7 @@ func hitItem(l *List, geo []rowGeo, x, y float64) *Item {
 	}
 	rows, _ := layout(l)
 	if len(geo) != len(rows) {
-		geo = nil
+		geo = nil // Render draws the resting layout then, so the click hits it too
 	}
 	for i, rw := range rows {
 		if rw.kind != rowItem {
