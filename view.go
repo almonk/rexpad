@@ -781,12 +781,12 @@ func runView(name string, opt viewOptions) error {
 					if rw.kind != rowItem || spins[rw.item.ID] < 1 || rw.item.Status != StatusActive {
 						continue
 					}
-					c := rw.center
+					c, open := rw.center, rw.open
 					if geo != nil && len(geo) == len(rws) {
-						if geo[i].open < 1 {
-							continue
-						}
-						c = geo[i].center
+						c, open = geo[i].center, geo[i].open
+					}
+					if open < 1 {
+						continue
 					}
 					want = append(want, struct{ center, x float64 }{c + rw.extra, measure.dotsX(rw.item, right, 1)})
 				}

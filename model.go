@@ -106,6 +106,10 @@ type List struct {
 	wrapKey string // the width and scale its items are wrapped for
 }
 
+// folded says the group's items are hidden. Only a group with a title
+// folds: without one, it has no header to click open again.
+func (g *Group) folded() bool { return g.Collapsed && g.Title != "" }
+
 func (g *Group) progress() float64 {
 	if g.Progress != nil {
 		return clamp01(*g.Progress)

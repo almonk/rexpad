@@ -254,16 +254,13 @@ type rowGeo struct{ center, open float64 }
 // collapseTau sets the pace of the fold; a change settles in about 4 tau.
 const collapseTau = 60 * time.Millisecond
 
-// geoFor is the resting geometry of l's rows with only vis showing (all of
-// them when vis is nil), and the content height.
+// geoFor is the resting geometry of l's rows with only vis showing (when vis
+// is nil, all but the items of collapsed groups), and the content height.
 func geoFor(l *List, vis []bool) ([]rowGeo, float64) {
 	rows, h := layoutVis(l, vis)
 	g := make([]rowGeo, len(rows))
 	for i, rw := range rows {
-		g[i] = rowGeo{rw.center, 1}
-		if vis != nil && !vis[i] {
-			g[i].open = 0
-		}
+		g[i] = rowGeo{rw.center, rw.open}
 	}
 	return g, h
 }

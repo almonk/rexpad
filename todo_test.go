@@ -2193,3 +2193,166 @@ func TestCommandsKeepGroupsCollapsed(t *testing.T) {
 		t.Errorf("an agent command expanded the group: %+v", g)
 	}
 }
+
+// collapsedList parses md and collapses the groups at the given indices.
+func collapsedList(t *testing.T, md string, groups ...int) *List {
+	t.Helper()
+	l, err := parseMarkdown(md)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gi := range groups {
+		l.Groups[gi].Collapsed = true
+	}
+	return l
+}
+
+func TestLayoutFoldsCollapsedGroups(t *testing.T) {
+	const md = "# A\n- [ ] a {#1}\n- [ ] b {#2}\n# B\n- [ ] c {#3}\n"
+	l := collapsedList(t, md, 0)
+	rows, h := layout(l)
+	if len(rows) != 5 {
+		t.Fatalf("%d rows, want 5: a collapsed group keeps its rows", len(rows))
+	}
+	var opens []float64
+	for _, rw := range rows {
+		opens = append(opens, rw.open)
+	}
+	if want := []float64{1, 0, 0, 1, 1}; !slices.Equal(opens, want) {
+		t.Errorf("open = %v, want %v", opens, want)
+	}
+	// It takes the room of a group with no items.
+	empty, _ := parseMarkdown("# A\n# B\n- [ ] c {#3}\n")
+	erows, eh := layout(empty)
+	if rows[3].center != erows[1].center || rows[4].center != erows[2].center || h != eh {
+		t.Errorf("B at %v, c at %v, height %v; want %v, %v, %v as with an empty A",
+			rows[3].center, rows[4].center, h, erows[1].center, erows[2].center, eh)
+	}
+	open, _ := parseMarkdown(md)
+	for i, rw := range func() []row { r, _ := layout(open); return r }() {
+		if rw.open != 1 {
+			t.Errorf("open list: row %d open %v, want 1", i, rw.open)
+		}
+	}
+	// A group with no title has no header to click, so it never collapses.
+	untitled := collapsedList(t, "- [ ] a {#1}\n", 0)
+	if r, _ := layout(untitled); r[0].open != 1 {
+		t.Error("an untitled group collapsed")
+	}
+}
+
+func TestGeoForFoldsCollapsedGroupsUnlessFindShowsThem(t *testing.T) {
+	l := collapsedList(t, "# A\n- [ ] apple {#1}\n- [ ] pear {#2}\n# B\n- [ ] plum {#3}\n", 0)
+	g, _ := geoFor(l, nil)
+	if g[1].open != 0 || g[2].open != 0 || g[4].open != 1 {
+		t.Errorf("at rest: %+v, want A's items folded", g)
+	}
+	// Find shows matching items even in a collapsed group, and leaves the
+	// stored state alone.
+	var f findState
+	f.setQuery(l, "pear")
+	g, _ = geoFor(l, f.vis)
+	if g[0].open != 1 || g[1].open != 0 || g[2].open != 1 {
+		t.Errorf("finding pear: %+v, want A's header and pear open", g)
+	}
+	if !l.Groups[0].Collapsed {
+		t.Error("find changed the stored state")
+	}
+	f.setQuery(l, "")
+	if g, _ = geoFor(l, f.vis); g[2].open != 0 {
+		t.Error("with the query cleared, the collapsed group stayed open")
+	}
+}
+
+func TestCollapseAndExpandFold(t *testing.T) {
+	const md = "# A\n- [ ] a {#1}\n- [ ] b {#2}\n# B\n- [ ] c {#3}\n"
+	for _, c := range []struct {
+		name     string
+		from, to *List
+	}{
+		{"collapse", collapsedList(t, md), collapsedList(t, md, 0)},
+		{"expand", collapsedList(t, md, 0), collapsedList(t, md)},
+	} {
+		from := arrivalGeo(c.from, nil, c.to)
+		to, _ := geoFor(c.to, nil)
+		if from == nil || slices.Equal(from, to) {
+			t.Errorf("%s: rows jump into place instead of folding", c.name)
+			continue
+		}
+		g := slices.Clone(from)
+		for i := 0; i < 200 && !easeGeo(c.to, g, to, 15*time.Millisecond); i++ {
+		}
+		if !slices.Equal(g, to) {
+			t.Errorf("%s: settled at %+v, want %+v", c.name, g, to)
+		}
+	}
+}
+
+func TestRenderHidesCollapsedItems(t *testing.T) {
+	fonts, err := loadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const md = "# A\n- [~] a {#1}\n# B\n- [ ] b {#2}\n"
+	hasActiveRow := func(l *List) bool {
+		img := (&renderer{fonts: fonts, scale: 1, pal: lightPalette}).Render(l, 400, 300, 0)
+		for y := 0; y < 300; y++ {
+			if img.RGBAAt(20, y) == lightPalette.activeBg {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasActiveRow(collapsedList(t, md)) {
+		t.Fatal("the open group's active row is not drawn")
+	}
+	if hasActiveRow(collapsedList(t, md, 0)) {
+		t.Error("the collapsed group's active row is drawn")
+	}
+}
+
+func TestHitItemSkipsCollapsedItems(t *testing.T) {
+	l := collapsedList(t, "# A\n- [ ] a {#1}\n- [ ] b {#2}\n# B\n- [ ] c {#3}\n", 0)
+	rows, _ := layout(l)
+	boxX := marginLeft + boxCenter
+	for y := 0.0; y < rows[4].center+itemPitch; y++ {
+		if id := itemID(hitItem(l, nil, boxX, y)); id == 1 || id == 2 {
+			t.Fatalf("hit collapsed item %d at y %v", id, y)
+		}
+	}
+	if id := itemID(hitItem(l, nil, boxX, rows[4].center)); id != 3 {
+		t.Errorf("hit %d where item 3 is drawn, want 3", id)
+	}
+}
+
+func TestFollowGoesToTheHeaderOfACollapsedGroup(t *testing.T) {
+	l := &List{}
+	many := func(title string) Group {
+		g := Group{Title: title}
+		for i := 0; i < 30; i++ {
+			g.Items = append(g.Items, Item{Text: "item", Status: StatusDone})
+		}
+		return g
+	}
+	later := many("Later")
+	later.Items[20].Status = StatusActive
+	later.Collapsed = true
+	l.Groups = []Group{many("First"), later, many("Tail")}
+	l.normalize()
+	rows, _ := layout(l)
+	header := -1.0
+	for _, rw := range rows {
+		if rw.kind == rowHeader && rw.group.Title == "Later" {
+			header = rw.center
+		}
+	}
+	const viewH = 300.0
+	if off, _ := followOffset(l, viewH); off != header-viewH/3 {
+		t.Errorf("offset %v, want %v: the collapsed group's header a third of the way down", off, header-viewH/3)
+	}
+	// With nothing active, the first open item leads the same way.
+	l.Groups[1].Items[20].Status = StatusPending
+	if off, _ := followOffset(l, viewH); off != header-viewH/3 {
+		t.Errorf("no active item: offset %v, want %v", off, header-viewH/3)
+	}
+}

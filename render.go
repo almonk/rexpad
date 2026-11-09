@@ -221,6 +221,7 @@ type row struct {
 	kind   rowKind
 	center float64 // the first line's center, in points from the top of the content
 	extra  float64 // how much taller than one line it is: its wrapped lines
+	open   float64 // how much of its room it takes: 1 shows, 0 is folded away
 	group  *Group
 	item   *Item
 }
@@ -244,11 +245,15 @@ func layoutVis(l *List, vis []bool) (rows []row, height float64) {
 
 // layoutOpen is the layout with each row taking up its share of room: open
 // is 1 for a row that shows, 0 for one folded away, and in between while it
-// folds (all 1 when open is nil). Rows stack like an accordion, so folding
-// rows shrink into their own slots and never overlap their neighbors. With
-// only 0s and 1s it's exactly the layout of the rows that show.
+// folds. When open is nil, every row shows except the items of a collapsed
+// group. Rows stack like an accordion, so folding rows shrink into their own
+// slots and never overlap their neighbors. With only 0s and 1s it's exactly
+// the layout of the rows that show.
 func layoutOpen(l *List, open []float64) (rows []row, height float64) {
-	w := func(i int) float64 {
+	w := func(i int, folded bool) float64 {
+		if open == nil && folded {
+			return 0
+		}
 		if open == nil {
 			return 1
 		}
@@ -263,9 +268,9 @@ func layoutOpen(l *List, open []float64) (rows []row, height float64) {
 		g := &l.Groups[gi]
 		head := 1.0
 		if g.Title != "" {
-			head = w(len(rows))
+			head = w(len(rows), false)
 			// A folding header rises a little into the gap above it.
-			rows = append(rows, row{kind: rowHeader, center: y - (1-head)*itemPitch/2, group: g})
+			rows = append(rows, row{kind: rowHeader, center: y - (1-head)*itemPitch/2, open: head, group: g})
 			if head > 0 {
 				bottom = math.Max(bottom, rows[len(rows)-1].center+(itemPitch/2)*head+marginBot)
 			}
@@ -277,12 +282,12 @@ func layoutOpen(l *List, open []float64) (rows []row, height float64) {
 		}
 		sum, room := 0.0, 0.0 // how many items show, and the room they take
 		for ii := range g.Items {
-			wi := w(len(rows))
+			wi := w(len(rows), g.folded())
 			it := &g.Items[ii]
 			ex := it.extra()
 			h := itemPitch + ex // a wrapped item is taller by its extra lines
 			// Folding, the item stays centered in its shrinking slot.
-			rows = append(rows, row{kind: rowItem, center: cursor + wi*h/2 - ex/2, extra: ex, group: g, item: it})
+			rows = append(rows, row{kind: rowItem, center: cursor + wi*h/2 - ex/2, extra: ex, open: wi, group: g, item: it})
 			if wi > 0 {
 				bottom = math.Max(bottom, cursor+wi*h+marginBot)
 			}
@@ -322,12 +327,12 @@ func hitItem(l *List, geo []rowGeo, x, y float64) *Item {
 		if rw.kind != rowItem {
 			continue
 		}
-		center := rw.center
+		center, open := rw.center, rw.open
 		if geo != nil {
-			if geo[i].open < 1 {
-				continue
-			}
-			center = geo[i].center
+			center, open = geo[i].center, geo[i].open
+		}
+		if open < 1 {
+			continue
 		}
 		if y >= center-itemPitch/2 && y < center+itemPitch/2+rw.extra {
 			return rw.item
@@ -345,17 +350,17 @@ func followOffset(l *List, viewH float64) (offset, maxOffset float64) {
 	if maxOffset == 0 {
 		return 0, 0
 	}
-	focus := -1.0
-	for _, rw := range rows {
+	focus := -1
+	for i, rw := range rows {
 		if rw.kind == rowItem && rw.item.Status == StatusActive {
-			focus = rw.center
+			focus = i
 			break
 		}
 	}
 	if focus < 0 {
-		for _, rw := range rows {
+		for i, rw := range rows {
 			if rw.kind == rowItem && rw.item.Status != StatusDone {
-				focus = rw.center
+				focus = i
 				break
 			}
 		}
@@ -363,7 +368,22 @@ func followOffset(l *List, viewH float64) (offset, maxOffset float64) {
 	if focus < 0 {
 		return 0, maxOffset
 	}
-	return math.Max(0, math.Min(focus-viewH/3, maxOffset)), maxOffset
+	y := rows[focus].center
+	if rows[focus].open < 1 {
+		// The user collapsed its group: show the group's header instead.
+		y = headerCenter(rows, rows[focus].group)
+	}
+	return math.Max(0, math.Min(y-viewH/3, maxOffset)), maxOffset
+}
+
+// headerCenter is the center of g's header row among rows.
+func headerCenter(rows []row, g *Group) float64 {
+	for _, rw := range rows {
+		if rw.kind == rowHeader && rw.group == g {
+			return rw.center
+		}
+	}
+	return 0
 }
 
 // Render draws the list into an image of exactly widthPx x heightPx device
@@ -396,7 +416,7 @@ func (r *renderer) Render(l *List, widthPx, heightPx int, offset float64) *image
 	left := marginLeft
 	right := float64(widthPx)/s - marginRight
 	for i, rw := range rows {
-		center, open := rw.center, 1.0
+		center, open := rw.center, rw.open
 		if geo != nil {
 			center, open = geo[i].center, geo[i].open
 		}
