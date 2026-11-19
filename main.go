@@ -21,6 +21,7 @@ Usage: rexpad [--list NAME] COMMAND [ARGS]
 
 Showing the list
   show [--below] [--ratio PCT] [--theme T]   open the viewer beside your pane (30% by default, no focus change); idempotent
+  show --float [--below] [--ratio PCT]       float it over the window's right edge (bottom with --below) instead of splitting
   hide                                       close the viewer pane
   view [--theme terminal|light|dark] [--scale N]
                                              run the viewer in this terminal (/ finds, q quits)
@@ -145,6 +146,7 @@ func run(args []string) error {
 		fs := flag.NewFlagSet("show", flag.ContinueOnError)
 		below := fs.Bool("below", false, "split below instead of right")
 		ratio := fs.Int("ratio", 30, "pane share of the split, percent")
+		float := fs.Bool("float", false, "float over the window's edge instead of splitting your pane")
 		theme := fs.String("theme", "terminal", "terminal (follow the Rex theme), light, or dark")
 		if err := fs.Parse(args); err != nil {
 			return err
@@ -153,7 +155,7 @@ func run(args []string) error {
 		if *below {
 			split = "below"
 		}
-		return showPane(name, showOptions{split: split, ratio: *ratio, theme: *theme})
+		return showPane(name, showOptions{split: split, ratio: *ratio, theme: *theme, float: *float})
 
 	case "hide":
 		return hidePane(name)

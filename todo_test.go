@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/zlib"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
@@ -1220,6 +1221,37 @@ func TestShowPaneStartsViewerWithCallerSettings(t *testing.T) {
 	want := strings.Join(viewerCommand(self, "l", "dark"), "\n")
 	if !strings.HasSuffix(strings.TrimSpace(string(got)), "\n--\n"+want) {
 		t.Errorf("rex split argv:\n%s\nwant it to end with:\n--\n%s", got, want)
+	}
+}
+
+func TestShowPaneFloatsViewerOverTheCallersWindow(t *testing.T) {
+	bin := t.TempDir()
+	reqFile := filepath.Join(bin, "request")
+	fakeRex := "#!/bin/sh\ncase $1 in\n" +
+		"whoami) echo '{\"session_id\":\"s\",\"window_id\":\"w\"}' ;;\n" +
+		"api) printf %s \"$4\" > " + reqFile + "; echo '{\"block_ids\":[\"block-9\"]}' ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(bin, "rex"), []byte(fakeRex), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REX_SERVER", "test")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := showPane("l", showOptions{split: "right", ratio: 30, theme: "dark", float: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(reqFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, _ := os.Executable()
+	command, _ := json.Marshal(viewerCommand(self, "l", "dark"))
+	want := `{"bounds":[0.7,0,0.3,1],"layout":{"block":{"flavor":"com.superlogical.terminal.shell","label":"Todo",` +
+		`"options":{"command":` + string(command) + `,"shell":"none"}}},"session_id":"s","window_id":"w"}`
+	if string(got) != want {
+		t.Errorf("session.new_layer request:\n%s\nwant:\n%s", got, want)
+	}
+	if id, _ := os.ReadFile(viewerPath("l")); string(id) != "block-9\n" {
+		t.Errorf("remembered viewer %q, want block-9", id)
 	}
 }
 

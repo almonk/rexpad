@@ -76,6 +76,9 @@ when you start unrelated work (then `set` the new plan instead).
   (or `REXPAD_LIST=NAME`) to every command, including `show`.
 - `rexpad show` takes 30% of your pane (a 70/30 split). `--below` splits
   downward; `--ratio PCT` sets another share.
+- `rexpad show --float` floats the viewer over the right 30% of the window
+  instead of splitting your pane, covering what is under it. Use it when the
+  user asks for a floating pane.
 - Colors follow the Rex theme (its background, foreground, and blue) and
   update when the user switches themes. `--theme light` or `--theme dark`
   pins the original design's colors instead.

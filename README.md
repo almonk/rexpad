@@ -171,6 +171,7 @@ rexpad [--list NAME] COMMAND
 
 Showing the list
   show [--below] [--ratio PCT] [--theme T]  open the viewer beside your pane (30%, no focus change)
+  show --float [--below] [--ratio PCT]      float it over the window's right edge instead of splitting
   hide                                      close the viewer pane
   view [--theme terminal|light|dark]        run the viewer in the current terminal (q quits)
   render -o FILE.png [--width PT]           write a PNG of the list
@@ -204,6 +205,7 @@ Agent skill
 | `--list NAME`, `$REXPAD_LIST` | the agent's pane (`$REX_BLOCK`) | Which list to use. Give several agents the same name to share one list. |
 | `--theme` | `terminal` | `terminal` follows the Rex theme; `light` and `dark` use fixed palettes. |
 | `--ratio PCT` | `30` | The pane's share of the split. |
+| `--float` | off | Float the viewer over the window's right edge (bottom with `--below`) instead of splitting your pane. `--ratio` is then its share of the window, and it covers what is under it. |
 | `--scale N` (`view`, `render`), `$REXPAD_SCALE` | from the cell size | Device pixels per point. |
 | `$REXPAD_FONT`, `$REXPAD_FONT_BOLD` | SF Pro Text | Paths to other font files. |
 | `$XDG_STATE_HOME` | `~/.local/state` | Lists are stored in `rexpad/` under it. |
@@ -236,7 +238,9 @@ values it started with, so run `hide` and then `show` to apply a change.
   the terminal reports a color-scheme change.
 - **The pane**: `show` runs `rex split` beside `$REX_BLOCK` without taking
   focus, then sets the 70/30 ratio with `rex block move`, and remembers the
-  pane so it doesn't open a second one.
+  pane so it doesn't open a second one. With `--float`, it starts the viewer
+  in a floating layer of your pane's window with the server's
+  `session.new_layer` method instead.
 
 ## Development
 
